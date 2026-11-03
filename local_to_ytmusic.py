@@ -31,6 +31,7 @@ import threading
 import time
 import unicodedata
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -49,6 +50,9 @@ AUTH_NAME = "browser.json"
 SETTINGS_NAME = "ytm_settings.json"
 BATCH_SIZE = 50
 DEFAULT_DELAY_S = 1.0
+DEFAULT_WORKERS = 4
+MAX_WORKERS = 8
+SEARCH_RETRIES = 3
 
 log = logging.getLogger("ytm")
 
@@ -88,6 +92,7 @@ class Config:
     like: bool = False
     dry_run: bool = False
     delay: float = DEFAULT_DELAY_S
+    workers: int = DEFAULT_WORKERS
 
     @property
     def cache_file(self) -> Path:
@@ -268,9 +273,20 @@ Playlista         - nazwa playlisty. Jeśli nie istnieje, zostanie
                     utworzona (prywatna). Puste = bez playlisty.
 Polub             - oznacza dopasowane utwory jako "Lubię to".
 Tylko test        - tylko skanuje i szuka, nic nie zmienia na koncie.
-                    Zalecane przy pierwszym uruchomieniu.
-Opóźnienie        - przerwa między zapytaniami (sekundy). Nie
-                    schodź poniżej 1 s, żeby YouTube nie blokował.
+                    Nie wymaga pliku autoryzacji. Zalecane na start.
+Opóźnienie        - przerwa po każdym zapytaniu w każdym wątku
+                    (sekundy). Nie schodź poniżej 1 s.
+Wątki             - ile wyszukiwań naraz (1-8, domyślnie 4).
+                    Więcej = szybciej, ale YouTube może zacząć
+                    ograniczać zapytania - program wtedy sam robi
+                    przerwę i ponawia. Wyszukiwanie odbywa się BEZ
+                    logowania, więc nie obciąża Twojego konta.
+                    Playlista i polubienia idą po kolei, z konta.
+
+Czas (orientacyjnie, 7000 utworów, 4 wątki):
+  wyszukiwanie ok. 1 h, playlista kilka minut,
+  polubienia ok. 2,5-4 h (YouTube pozwala lubić tylko po jednym).
+  Już polubione utwory są pomijane.
 
 Artysta i tytuł są brane z tagów. Gdy ich brak, z nazwy pliku
 w formacie "Artysta - Tytuł" (numer ścieżki z przodu jest pomijany).
@@ -299,6 +315,61 @@ def auth_problem(path: Path) -> str | None:
     return None
 
 
+class Throttle:
+    """Wspólna dla wątków pauza, gdy YouTube zaczyna odrzucać zapytania."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._until = 0.0
+
+    def wait(self, stop: threading.Event) -> None:
+        while True:
+            with self._lock:
+                remaining = self._until - time.monotonic()
+            if remaining <= 0:
+                return
+            if stop.wait(min(remaining, 0.5)):
+                raise Stopped
+
+    def penalize(self, seconds: float) -> None:
+        with self._lock:
+            self._until = max(self._until, time.monotonic() + seconds)
+
+
+_local = threading.local()
+
+
+def _search_client() -> YTMusic:
+    """Osobny, niezalogowany klient na wątek - wyszukiwanie nie obciąża konta."""
+    yt = getattr(_local, "yt", None)
+    if yt is None:
+        yt = _local.yt = YTMusic()
+    return yt
+
+
+def search_one(track: Track, delay: float, stop: threading.Event,
+               throttle: Throttle) -> str | None:
+    for attempt in range(1, SEARCH_RETRIES + 1):
+        throttle.wait(stop)
+        if stop.is_set():
+            raise Stopped
+        try:
+            vid = find_video_id(_search_client(), track)
+        except Exception as exc:
+            if attempt == SEARCH_RETRIES:
+                raise
+            limited = "HTTP 429" in str(exc)
+            pause = (60 if limited else 10) * attempt
+            log.warning("%s '%s' - pauza %d s, ponawiam (%d/%d)",
+                        "YouTube ogranicza zapytania" if limited else f"Błąd ({exc})",
+                        track.query, pause, attempt, SEARCH_RETRIES - 1)
+            throttle.penalize(pause)
+            continue
+        stop.wait(delay)
+        return vid
+    return None
+
+
 ProgressCb = Callable[[str, int, int], None]
 
 
@@ -318,12 +389,13 @@ def run_import(
     if not cfg.folder.is_dir():
         log.error("Folder nie istnieje: %s", cfg.folder)
         return 1
-    if not cfg.auth.is_file():
-        log.error("Brak pliku autoryzacji: %s", cfg.auth)
-        return 1
-    if problem := auth_problem(cfg.auth):
-        log.error("%s", problem)
-        return 1
+    if not cfg.dry_run:  # wyszukiwanie działa bez konta; konto tylko do zmian
+        if not cfg.auth.is_file():
+            log.error("Brak pliku autoryzacji: %s", cfg.auth)
+            return 1
+        if problem := auth_problem(cfg.auth):
+            log.error("%s", problem)
+            return 1
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("Skanuję %s ...", cfg.folder)
@@ -336,36 +408,50 @@ def run_import(
     if not tracks:
         return 0
 
-    yt = YTMusic(str(cfg.auth))
     cache = load_cache(cfg.cache_file)
-    found: list[str] = []
-    missing: list[Track] = []
-    stopped = False
+    todo = [t for t in tracks if t.key not in cache]
+    total = len(tracks)
+    done = total - len(todo)
+    log.info("Już w cache: %d | do wyszukania: %d (wątki: %d)", done, len(todo), cfg.workers)
+    progress("Wyszukiwanie", done, total)
 
+    throttle = Throttle()
+    failed = 0
+    stopped = False
+    pool = ThreadPoolExecutor(max_workers=max(1, cfg.workers))
     try:
-        for i, track in enumerate(tracks, 1):
-            check_stop()
-            progress("Wyszukiwanie", i, len(tracks))
-            if track.key not in cache:
-                try:
-                    cache[track.key] = find_video_id(yt, track)
-                except Exception as exc:  # błędy sieci/API - pomiń, nie cache'uj
-                    log.warning("Wyszukiwanie nieudane '%s': %s", track.query, exc)
-                    continue
-                time.sleep(cfg.delay)
-                if i % 25 == 0:
-                    save_cache(cfg.cache_file, cache)
-            vid = cache[track.key]
-            if vid:
-                found.append(vid)
+        futures = {pool.submit(search_one, t, cfg.delay, stop, throttle): t for t in todo}
+        for n, fut in enumerate(as_completed(futures), 1):
+            track = futures[fut]
+            try:
+                vid = fut.result()
+            except Stopped:
+                raise
+            except Exception as exc:  # po ponowieniach - pomiń, nie cache'uj
+                failed += 1
+                log.warning("Wyszukiwanie nieudane '%s': %s", track.query, exc)
+                vid = None
             else:
-                missing.append(track)
-            log.info("[%d/%d] %s %s", i, len(tracks), "OK " if vid else "---", track.query)
+                cache[track.key] = vid
+            log.info("[%d/%d] %s %s", done + n, total, "OK " if vid else "---", track.query)
+            progress("Wyszukiwanie", done + n, total)
+            if n % 50 == 0:
+                save_cache(cfg.cache_file, cache)
+            check_stop()
     except (Stopped, KeyboardInterrupt):
         stopped = True
+        stop.set()
         log.warning("Przerwano - zapisuję postęp.")
     finally:
+        pool.shutdown(wait=True, cancel_futures=True)
         save_cache(cfg.cache_file, cache)
+
+    found: list[str] = []
+    missing: list[Track] = []
+    for track in tracks:  # kolejność jak na dysku
+        if track.key in cache:
+            vid = cache[track.key]
+            (found.append(vid) if vid else missing.append(track))
 
     with cfg.report_file.open("w", newline="", encoding="utf-8-sig") as fh:
         writer = csv.writer(fh, delimiter=";")
@@ -373,6 +459,9 @@ def run_import(
         writer.writerows((t.artist, t.title) for t in missing)
 
     log.info("Dopasowano: %d | brak: %d (-> %s)", len(found), len(missing), cfg.report_file)
+    if failed:
+        log.warning("Nieudane wyszukiwania: %d - zostaną ponowione przy następnym "
+                    "uruchomieniu.", failed)
 
     # Po przerwaniu nie zmieniamy konta na podstawie niepełnych wyników.
     if stopped:
@@ -384,6 +473,7 @@ def run_import(
         return 0
 
     unique = list(dict.fromkeys(found))
+    yt = YTMusic(str(cfg.auth))
     try:
         if cfg.playlist:
             pid = get_or_create_playlist(yt, cfg.playlist)
@@ -406,9 +496,18 @@ def run_import(
                 time.sleep(cfg.delay)
 
         if cfg.like:
-            for n, vid in enumerate(unique, 1):
+            try:
+                liked = {t.get("videoId")
+                         for t in yt.get_liked_songs(limit=None).get("tracks") or []}  # type: ignore[arg-type]
+            except Exception as exc:
+                log.warning("Nie udało się pobrać polubionych (%s) - lubię wszystkie.", exc)
+                liked = set()
+            to_like = [v for v in unique if v not in liked]
+            log.info("Do polubienia: %d (już polubione: %d)",
+                     len(to_like), len(unique) - len(to_like))
+            for n, vid in enumerate(to_like, 1):
                 check_stop()
-                progress("Polubienia", n, len(unique))
+                progress("Polubienia", n, len(to_like))
                 try:
                     yt.rate_song(vid, LikeStatus.LIKE)
                 except Exception as exc:
@@ -455,6 +554,7 @@ def run_gui() -> int:
     v_like = tk.BooleanVar(value=st.get("like", False))
     v_dry = tk.BooleanVar(value=st.get("dry_run", True))
     v_delay = tk.StringVar(value=str(st.get("delay", DEFAULT_DELAY_S)))
+    v_workers = tk.StringVar(value=str(st.get("workers", DEFAULT_WORKERS)))
     v_status = tk.StringVar(value="Gotowy.")
 
     frm = ttk.Frame(root, padding=10)
@@ -580,6 +680,9 @@ def run_gui() -> int:
     ttk.Label(opts, text="Opóźnienie [s]:").pack(side="left", padx=(16, 4))
     ttk.Spinbox(opts, from_=0.0, to=10.0, increment=0.5, width=5,
                 textvariable=v_delay).pack(side="left")
+    ttk.Label(opts, text="Wątki:").pack(side="left", padx=(16, 4))
+    ttk.Spinbox(opts, from_=1, to=MAX_WORKERS, increment=1, width=4,
+                textvariable=v_workers).pack(side="left")
 
     r += 1
     btns = ttk.Frame(frm)
@@ -626,6 +729,7 @@ def run_gui() -> int:
             "folder": v_folder.get(), "auth": v_auth.get(), "out_dir": v_out.get(),
             "playlist": v_playlist.get(), "like": v_like.get(),
             "dry_run": v_dry.get(), "delay": v_delay.get(),
+            "workers": v_workers.get(),
         }
         try:
             settings_file.write_text(json.dumps(data, ensure_ascii=False, indent=1),
@@ -639,6 +743,11 @@ def run_gui() -> int:
         except ValueError:
             messagebox.showerror(APP_NAME, "Opóźnienie musi być liczbą.")
             return
+        try:
+            workers = min(MAX_WORKERS, max(1, int(v_workers.get())))
+        except ValueError:
+            messagebox.showerror(APP_NAME, f"Wątki: liczba od 1 do {MAX_WORKERS}.")
+            return
         cfg = Config(
             folder=Path(v_folder.get().strip()),
             auth=Path(v_auth.get().strip()),
@@ -647,19 +756,22 @@ def run_gui() -> int:
             like=v_like.get(),
             dry_run=v_dry.get(),
             delay=delay,
+            workers=workers,
         )
         if not v_folder.get().strip() or not cfg.folder.is_dir():
             messagebox.showerror(APP_NAME, "Wybierz istniejący folder z muzyką.")
             return
-        if not cfg.auth.is_file():
-            messagebox.showerror(
-                APP_NAME,
-                "Brak pliku autoryzacji.\nUżyj przycisku 'Utwórz z nagłówków...'.",
-            )
-            return
-        if problem := auth_problem(cfg.auth):
-            messagebox.showerror(APP_NAME, problem)
-            return
+        if not cfg.dry_run:
+            if not cfg.auth.is_file():
+                messagebox.showerror(
+                    APP_NAME,
+                    "Brak pliku autoryzacji.\nUżyj przycisku 'Utwórz z nagłówków...'.\n\n"
+                    "(W trybie 'Tylko test' plik nie jest potrzebny.)",
+                )
+                return
+            if problem := auth_problem(cfg.auth):
+                messagebox.showerror(APP_NAME, problem)
+                return
         if not cfg.dry_run and not cfg.playlist and not cfg.like:
             if not messagebox.askyesno(
                 APP_NAME,
@@ -759,6 +871,8 @@ def run_cli(argv: list[str]) -> int:
     ap.add_argument("--like", action="store_true", help="polub dopasowane")
     ap.add_argument("--dry-run", action="store_true", help="tylko skan + szukanie")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY_S)
+    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                    help=f"równoległe wyszukiwania (1-{MAX_WORKERS})")
     args = ap.parse_args(argv)
 
     stream = sys.stderr or sys.stdout
@@ -771,7 +885,8 @@ def run_cli(argv: list[str]) -> int:
 
     cfg = Config(folder=args.folder, auth=args.auth, out_dir=args.out,
                  playlist=args.playlist, like=args.like, dry_run=args.dry_run,
-                 delay=args.delay)
+                 delay=args.delay,
+                 workers=min(MAX_WORKERS, max(1, args.workers)))
     try:
         return run_import(cfg)
     except Exception as exc:
