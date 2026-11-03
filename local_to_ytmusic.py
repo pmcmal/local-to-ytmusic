@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 import unicodedata
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -211,6 +212,74 @@ AUTH_HINT = (
     "Skopiuj nagłówki żądania POST /browse z music.youtube.com (będąc zalogowanym) "
     "i utwórz plik ponownie przyciskiem 'Utwórz z nagłówków...'."
 )
+
+
+HELP_TEXT = """\
+JAK UTWORZYĆ PLIK AUTORYZACJI (browser.json)
+============================================
+Plik robisz raz. Potem program go zapamiętuje.
+
+1. Otwórz Chrome, Edge albo Firefox i wejdź na https://music.youtube.com
+   Zaloguj się na konto, na które ma trafić muzyka.
+
+2. Naciśnij F12 (narzędzia deweloperskie) i przejdź do zakładki
+   "Network" (po polsku: "Sieć").
+
+3. Odśwież stronę (F5) albo kliknij w YouTube Music "Biblioteka",
+   żeby pojawiły się żądania.
+
+4. W polu filtra (Filter) wpisz:  browse
+   Kliknij żądanie "browse?..." z metodą POST i statusem 200.
+   (Kolumnę Metoda/Method widać po najechaniu albo w szczegółach.)
+
+5. W prawym panelu otwórz zakładkę "Headers" (Nagłówki)
+   i znajdź sekcję "Request Headers" (Nagłówki żądania).
+     - Chrome/Edge: zaznacz myszką całą sekcję Request Headers
+       (od pierwszej do ostatniej linii) i skopiuj Ctrl+C.
+       Można też włączyć przełącznik "Raw" i skopiować całość.
+     - Firefox: w "Request Headers" włącz przełącznik "Raw"
+       (Nieprzetworzone), zaznacz wszystko i skopiuj Ctrl+C.
+
+6. W tym programie kliknij "Utwórz z nagłówków...", wklej (Ctrl+V)
+   i kliknij "Zapisz". Plik zapisze się w ścieżce z pola
+   "Plik autoryzacji" (domyślnie obok programu).
+
+Skopiowane nagłówki MUSZĄ zawierać m.in.:
+   authorization: SAPISIDHASH ...
+   cookie: ... __Secure-3PAPISID=... ...
+Jeśli program zgłasza, że ich brakuje: skopiowano złe żądanie
+(np. GET zamiast POST) albo nie jesteś zalogowany.
+
+WAŻNE
+ - browser.json daje pełny dostęp do konta YouTube. Nie wysyłaj go
+   nikomu i nie wrzucaj do internetu.
+ - Plik działa, dopóki nie wylogujesz się z YouTube w tej
+   przeglądarce. Po wylogowaniu zrób go ponownie.
+
+
+JAK UŻYWAĆ PROGRAMU
+===================
+Folder z muzyką   - folder z plikami FLAC/MP3. Podfoldery są
+                    przeszukiwane automatycznie.
+Plik autoryzacji  - browser.json (patrz wyżej).
+Folder wyników    - tu trafia cache (ytm_cache.json) i raport utworów
+                    nieznalezionych (ytm_not_found.csv).
+Playlista         - nazwa playlisty. Jeśli nie istnieje, zostanie
+                    utworzona (prywatna). Puste = bez playlisty.
+Polub             - oznacza dopasowane utwory jako "Lubię to".
+Tylko test        - tylko skanuje i szuka, nic nie zmienia na koncie.
+                    Zalecane przy pierwszym uruchomieniu.
+Opóźnienie        - przerwa między zapytaniami (sekundy). Nie
+                    schodź poniżej 1 s, żeby YouTube nie blokował.
+
+Artysta i tytuł są brane z tagów. Gdy ich brak, z nazwy pliku
+w formacie "Artysta - Tytuł" (numer ścieżki z przodu jest pomijany).
+
+Cache: utwory już wyszukane nie są szukane ponownie przy kolejnym
+uruchomieniu. Usuń ytm_cache.json, żeby wyszukać wszystko od nowa.
+Stop przerywa pracę i zapisuje postęp (bez zmian na koncie, jeśli
+przerwano w trakcie wyszukiwania).
+"""
 
 
 def auth_problem(path: Path) -> str | None:
@@ -406,21 +475,45 @@ def run_gui() -> int:
         if f:
             v_auth.set(os.path.normpath(f))
 
+    help_win: list[tk.Toplevel] = []
+
+    def show_help() -> None:
+        if help_win and help_win[0].winfo_exists():
+            help_win[0].lift()
+            help_win[0].focus_force()
+            return
+        win = tk.Toplevel(root)
+        win.title(f"Pomoc - {APP_NAME}")
+        help_win[:] = [win]
+        txt = scrolledtext.ScrolledText(win, width=78, height=34, wrap="word",
+                                        font=("Consolas", 10))
+        txt.insert("1.0", HELP_TEXT)
+        txt.config(state="disabled")
+        txt.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=(4, 10))
+        ttk.Button(bar, text="Otwórz music.youtube.com",
+                   command=lambda: webbrowser.open("https://music.youtube.com")
+                   ).pack(side="left")
+        ttk.Button(bar, text="Zamknij", command=win.destroy).pack(side="right")
+
     def create_auth() -> None:
         win = tk.Toplevel(root)
         win.title("Autoryzacja YouTube Music")
         win.transient(root)
         win.grab_set()
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=10, pady=(10, 4))
         ttk.Label(
-            win, justify="left", wraplength=560,
+            top, justify="left", wraplength=500,
             text=(
-                "1. Zaloguj się na music.youtube.com w Chrome/Edge/Firefox.\n"
-                "2. F12 → zakładka Network (Sieć) → odśwież stronę.\n"
-                "3. Wpisz w filtr 'browse', kliknij żądanie POST /browse.\n"
-                "4. Skopiuj całe 'Request Headers' (Nagłówki żądania) i wklej poniżej.\n\n"
+                "Wklej poniżej nagłówki żądania POST /browse z music.youtube.com "
+                "(F12 → Network → filtr 'browse' → Headers → Request Headers).\n"
+                "Dokładna instrukcja: przycisk ?\n\n"
                 "Plik browser.json daje pełny dostęp do konta - nie udostępniaj go."
             ),
-        ).pack(padx=10, pady=(10, 4), anchor="w")
+        ).pack(side="left", anchor="w")
+        ttk.Button(top, text="?", width=3, command=show_help).pack(side="right", anchor="n")
         txt = scrolledtext.ScrolledText(win, width=80, height=16)
         txt.pack(padx=10, pady=4, fill="both", expand=True)
 
@@ -465,6 +558,7 @@ def run_gui() -> int:
     ttk.Label(frm, text="Plik autoryzacji:").grid(row=r, column=0, sticky="w", pady=3)
     ttk.Entry(frm, textvariable=v_auth).grid(row=r, column=1, sticky="ew", padx=6)
     ttk.Button(frm, text="Wybierz...", command=browse_auth).grid(row=r, column=2, sticky="ew")
+    ttk.Button(frm, text="?", width=3, command=show_help).grid(row=r, column=3, padx=(4, 0))
     r += 1
     ttk.Button(frm, text="Utwórz z nagłówków...", command=create_auth).grid(row=r, column=2, sticky="ew")
 
@@ -494,9 +588,11 @@ def run_gui() -> int:
     b_stop = ttk.Button(btns, text="Stop", state="disabled")
     b_report = ttk.Button(btns, text="Otwórz raport braków")
     b_folder = ttk.Button(btns, text="Otwórz folder wyników")
+    b_help = ttk.Button(btns, text="Pomoc", command=show_help)
     b_start.pack(side="left")
     b_stop.pack(side="left", padx=6)
-    b_folder.pack(side="right")
+    b_help.pack(side="right")
+    b_folder.pack(side="right", padx=6)
     b_report.pack(side="right", padx=6)
 
     r += 1
