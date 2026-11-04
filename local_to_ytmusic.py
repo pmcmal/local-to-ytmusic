@@ -263,8 +263,10 @@ JAK UTWORZYĆ PLIK AUTORYZACJI (browser.json)
 ============================================
 Plik robisz raz. Potem program go zapamiętuje.
 
-1. Otwórz Chrome, Edge albo Firefox i wejdź na https://music.youtube.com
-   Zaloguj się na konto, na które ma trafić muzyka.
+1. Otwórz OKNO INCOGNITO (Chrome/Edge: Ctrl+Shift+N, Firefox: okno
+   prywatne Ctrl+Shift+P) i wejdź na https://music.youtube.com
+   Zaloguj się na konto, na które ma trafić muzyka (jeśli masz kilka
+   kanałów - przełącz na właściwy). Dlaczego incognito - patrz pkt 5.
 
 2. Naciśnij F12 (narzędzia deweloperskie) i przejdź do zakładki
    "Network" (po polsku: "Sieć").
@@ -316,8 +318,9 @@ Jeśli program zgłasza, że ich brakuje: skopiowano złe żądanie
 WAŻNE
  - browser.json daje pełny dostęp do konta YouTube. Nie wysyłaj go
    nikomu i nie wrzucaj do internetu.
- - Plik działa, dopóki nie wylogujesz się z YouTube w tej
-   przeglądarce. Po wylogowaniu zrób go ponownie.
+ - Plik przestaje działać po wylogowaniu z YouTube w tej przeglądarce
+   albo gdy przeglądarka wymieni logowanie (otwarta karta YouTube).
+   Dlatego najlepiej robić go w oknie incognito i potem je zamknąć.
 
 
 JAK UŻYWAĆ PROGRAMU
@@ -351,8 +354,12 @@ Czas (orientacyjnie, 7000 utworów, 4 wątki):
 
 Błędy: YouTube co jakiś czas odrzuca pojedyncze zapytanie. Program
 ponawia od razu (do 3 prób), a utwory, które dalej nie przeszły,
-odkłada i ponawia na końcu (2 rundy, co 60 s). Jeśli coś zostanie,
-wystarczy później kliknąć Start ponownie.
+odkłada i ponawia na końcu (2 rundy, co 60 s). Przy błędach sam
+zwiększa opóźnienie (do 5 s). Jeśli coś zostanie, wystarczy później
+kliknąć Start ponownie. Przy dużej kolekcji polecane opóźnienie: 3 s.
+
+Na końcu program pobiera listę polubionych z konta i pisze
+"SPRAWDZONE NA KONCIE: polubione X z Y" - to jest faktyczny wynik.
 
 Artysta i tytuł są brane z tagów. Gdy ich brak, z nazwy pliku
 w formacie "Artysta - Tytuł" (numer ścieżki z przodu jest pomijany).
