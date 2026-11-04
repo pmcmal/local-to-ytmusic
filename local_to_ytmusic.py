@@ -55,6 +55,8 @@ DEFAULT_WORKERS = 4
 MAX_WORKERS = 8
 SEARCH_RETRIES = 3
 MAX_FAILS_IN_ROW = 10
+LATER_ROUNDS = 2       # ile razy na końcu ponowić nieudane polubienia
+LATER_PAUSE_S = 60     # przerwa przed każdą rundą ponawiania
 
 log = logging.getLogger("ytm")
 
@@ -319,6 +321,11 @@ Czas (orientacyjnie, 7000 utworów, 4 wątki):
   wyszukiwanie ok. 1 h, playlista kilka minut,
   polubienia ok. 2,5-4 h (YouTube pozwala lubić tylko po jednym).
   Już polubione utwory są pomijane.
+
+Błędy: YouTube co jakiś czas odrzuca pojedyncze zapytanie. Program
+ponawia od razu (do 3 prób), a utwory, które dalej nie przeszły,
+odkłada i ponawia na końcu (2 rundy, co 60 s). Jeśli coś zostanie,
+wystarczy później kliknąć Start ponownie.
 
 Artysta i tytuł są brane z tagów. Gdy ich brak, z nazwy pliku
 w formacie "Artysta - Tytuł" (numer ścieżki z przodu jest pomijany).
@@ -631,9 +638,11 @@ def run_import(
             log.info("Do polubienia: %d (już polubione: %d)",
                      len(to_like), len(unique) - len(to_like))
             ok = 0
+            later: list[str] = []  # nieudane - ponowione na końcu, po przerwie
             for n, vid in enumerate(to_like, 1):
                 check_stop()
-                progress(f"Polubienia (udane: {ok}, nieudane: {n - 1 - ok})", n, len(to_like))
+                progress(f"Polubienia (udane: {ok}, do ponowienia: {len(later)})",
+                         n, len(to_like))
                 try:
                     with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
                     ok += 1
@@ -641,11 +650,40 @@ def run_import(
                 except Stopped:
                     raise
                 except Exception as exc:
-                    failure("Like nieudany %s: %s", vid, exc)
+                    later.append(vid)
+                    failure("Like nieudany %s: %s - ponowię później", vid, exc)
                 if n % 50 == 0:
                     log.info("Polubiono %d z %d", ok, n)
                 time.sleep(cfg.delay)
-            log.info("Polubiono łącznie: %d, nieudane: %d", ok, len(to_like) - ok)
+
+            for rnd in range(1, LATER_ROUNDS + 1):
+                if not later:
+                    break
+                log.info("Ponawiam %d nieudanych polubień za %d s (runda %d/%d)...",
+                         len(later), LATER_PAUSE_S, rnd, LATER_ROUNDS)
+                if stop.wait(LATER_PAUSE_S):
+                    raise Stopped
+                fails = 0
+                still: list[str] = []
+                for n, vid in enumerate(later, 1):
+                    check_stop()
+                    progress(f"Ponawianie {rnd}/{LATER_ROUNDS} (udane: {ok})", n, len(later))
+                    try:
+                        with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
+                        ok += 1
+                        fails = 0
+                        log.info("Ponowiony like OK: %s", vid)
+                    except Stopped:
+                        raise
+                    except Exception as exc:
+                        still.append(vid)
+                        failure("Ponowiony like nieudany %s: %s", vid, exc)
+                    time.sleep(cfg.delay)
+                later = still
+
+            log.info("Polubiono łącznie: %d z %d%s", ok, len(to_like),
+                     f" | nadal nieudane: {len(later)} (uruchom Start ponownie później)"
+                     if later else " - wszystkie udane.")
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
