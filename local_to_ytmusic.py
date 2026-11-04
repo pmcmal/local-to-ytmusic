@@ -267,12 +267,21 @@ Plik robisz raz. Potem program go zapamiętuje.
 2. Naciśnij F12 (narzędzia deweloperskie) i przejdź do zakładki
    "Network" (po polsku: "Sieć").
 
-3. Odśwież stronę (F5) albo kliknij w YouTube Music "Biblioteka",
-   żeby pojawiły się żądania.
+3. Przy otwartym F12 przejdź w YouTube Music do POLUBIONYCH UTWORÓW:
+   "Biblioteka" -> "Polubione utwory" (albo playlista "Polubione").
+   To zawsze tworzy żądanie "browse".
+   (Samo odświeżenie strony F5 często go NIE tworzy, a lista w Network
+   pokazuje tylko żądania zrobione PO otwarciu F12.)
 
 4. W polu filtra (Filter) wpisz:  browse
    Kliknij żądanie "browse?..." z metodą POST i statusem 200.
    (Kolumnę Metoda/Method widać po najechaniu albo w szczegółach.)
+   Sprawdź, czy nad listą jest zaznaczone "All" (Wszystko) albo
+   "Fetch/XHR", a nie np. "Img" czy "JS".
+
+   TYLKO jeśli "browse" dalej nie ma: wpisz w filtr  youtubei
+   i weź dowolne żądanie POST z listy (np. "next" po kliknięciu
+   piosenki) - ma te same nagłówki logowania i też zadziała.
 
 5. W prawym panelu otwórz zakładkę "Headers" (Nagłówki)
    i znajdź sekcję "Request Headers" (Nagłówki żądania).
@@ -1120,6 +1129,9 @@ def run_gui() -> int:
             text=(
                 "Wklej poniżej nagłówki żądania POST /browse z music.youtube.com "
                 "(F12 → Network → filtr 'browse' → Headers → Request Headers).\n"
+                "Przy otwartym F12 wejdź w YT Music w 'Polubione utwory' - wtedy "
+                "pojawi się 'browse'. Tylko gdy dalej go nie ma: filtr 'youtubei' "
+                "i dowolne żądanie POST.\n"
                 "Dokładna instrukcja: przycisk ?\n\n"
                 "Plik browser.json daje pełny dostęp do konta - nie udostępniaj go."
             ),
