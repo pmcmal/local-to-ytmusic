@@ -115,6 +115,14 @@ class TooManyFailures(Exception):
     """Zbyt wiele błędów z rzędu przy zmianach na koncie."""
 
 
+class SessionExpired(Exception):
+    """YouTube wylogował sesję z browser.json (HTTP 401)."""
+
+
+def _is_401(exc: BaseException) -> bool:
+    return "HTTP 401" in str(exc)
+
+
 def _first(tags: object, name: str) -> str:
     """Zwraca pierwszą wartość tagu (EasyID3 / Vorbis) albo pusty string."""
     try:
@@ -475,6 +483,8 @@ def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3
         try:
             return fn()
         except Exception as exc:
+            if _is_401(exc):
+                raise SessionExpired(str(exc)) from exc
             if attempt == attempts:
                 raise
             pause = 5 * attempt
@@ -539,7 +549,7 @@ def run_import(
             track = futures[fut]
             try:
                 vid = fut.result()
-            except Stopped:
+            except (Stopped, SessionExpired):
                 raise
             except Exception as exc:  # po ponowieniach - pomiń, nie cache'uj
                 failed += 1
@@ -592,8 +602,10 @@ def run_import(
     try:
         log.info("Konto: %s", account_label(yt))
     except Exception as exc:
-        log.error("Logowanie do konta nie działa (%s). Utwórz plik autoryzacji "
-                  "ponownie - instrukcja pod przyciskiem '?'.", exc)
+        log.error("Logowanie do konta nie działa - sesja wygasła albo plik jest zły "
+                  "(%s). Kliknij 'Utwórz z nagłówków...' i wklej świeże nagłówki "
+                  "z music.youtube.com - instrukcja pod przyciskiem '?'.",
+                  str(exc)[:120])
         return 1
 
     fails = 0
@@ -637,7 +649,7 @@ def run_import(
                         fails = 0
                         parts[part_i][2] += len(batch)
                         log.info("'%s': +%d (razem %d)", name, len(batch), parts[part_i][2])
-                except (TooManyFailures, Stopped):
+                except (TooManyFailures, Stopped, SessionExpired):
                     raise
                 except Exception as exc:
                     failure("'%s': błąd dodawania partii: %s", name, exc)
@@ -652,7 +664,7 @@ def run_import(
                 liked = {t.get("videoId") for t in with_retry(
                     lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
                     "Pobieranie polubionych").get("tracks") or []}
-            except Stopped:
+            except (Stopped, SessionExpired):
                 raise
             except Exception as exc:
                 log.warning("Nie udało się pobrać polubionych (%s) - lubię wszystkie.", exc)
@@ -670,7 +682,7 @@ def run_import(
                     with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
                     ok += 1
                     fails = 0
-                except Stopped:
+                except (Stopped, SessionExpired):
                     raise
                 except Exception as exc:
                     later.append(vid)
@@ -700,7 +712,7 @@ def run_import(
                         ok += 1
                         fails = 0
                         log.info("Ponowiony like OK: %s", vid)
-                    except Stopped:
+                    except (Stopped, SessionExpired):
                         raise
                     except Exception as exc:
                         still.append(vid)
@@ -724,7 +736,7 @@ def run_import(
                          len(unique) - len(missing), len(unique),
                          f"  |  brakuje: {len(missing)} - kliknij Start ponownie później"
                          if missing else "  - komplet.")
-            except Stopped:
+            except (Stopped, SessionExpired):
                 raise
             except Exception as exc:
                 log.warning("Nie udało się sprawdzić polubionych na koncie: %s", exc)
@@ -732,6 +744,11 @@ def run_import(
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
+    except SessionExpired:
+        log.error("SESJA WYGASŁA - YouTube wylogował plik autoryzacji (HTTP 401). "
+                  "Zrób nowy plik: kliknij 'Utwórz z nagłówków...' i wklej świeże "
+                  "nagłówki z music.youtube.com, potem Start (zrobione są pomijane).")
+        return 1
     except TooManyFailures:
         log.error("%d błędów z rzędu - przerywam. Sprawdź połączenie i plik "
                   "autoryzacji, potem uruchom ponownie (zrobione rzeczy są pomijane).",
