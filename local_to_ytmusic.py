@@ -49,10 +49,12 @@ REPORT_NAME = "ytm_not_found.csv"
 AUTH_NAME = "browser.json"
 SETTINGS_NAME = "ytm_settings.json"
 BATCH_SIZE = 50
+PLAYLIST_LIMIT = 5000  # limit YouTube na jedną playlistę
 DEFAULT_DELAY_S = 1.0
 DEFAULT_WORKERS = 4
 MAX_WORKERS = 8
 SEARCH_RETRIES = 3
+MAX_FAILS_IN_ROW = 10
 
 log = logging.getLogger("ytm")
 
@@ -105,6 +107,10 @@ class Config:
 
 class Stopped(Exception):
     """Użytkownik przerwał pracę."""
+
+
+class TooManyFailures(Exception):
+    """Zbyt wiele błędów z rzędu przy zmianach na koncie."""
 
 
 def _first(tags: object, name: str) -> str:
@@ -201,15 +207,36 @@ def find_video_id(yt: YTMusic, track: Track) -> str | None:
     return None
 
 
-def get_or_create_playlist(yt: YTMusic, name: str) -> str:
-    for pl in yt.get_library_playlists(limit=None):
-        if pl.get("title") == name:
-            return str(pl["playlistId"])
+def part_name(base: str, n: int) -> str:
+    """Nazwa n-tej części: 'Baza', 'Baza 2', 'Baza 3'..."""
+    return base if n == 1 else f"{base} {n}"
+
+
+def create_playlist(yt: YTMusic, name: str) -> str:
     result = yt.create_playlist(name, "Import z lokalnej kolekcji", "PRIVATE")
     if not isinstance(result, str):
         raise RuntimeError(f"Nie udało się utworzyć playlisty: {result}")
     log.info("Utworzono playlistę '%s'", name)
     return result
+
+
+def load_playlist_parts(yt: YTMusic, base: str) -> tuple[list[list], set[str]]:
+    """Istniejące części playlisty: [[nazwa, id, liczba_utworów], ...] + ich videoId."""
+    library = {}
+    for pl in yt.get_library_playlists(limit=None):
+        library.setdefault(pl.get("title"), pl.get("playlistId"))
+    parts: list[list] = []
+    existing: set[str] = set()
+    n = 1
+    while (pid := library.get(part_name(base, n))) is not None:
+        pl = yt.get_playlist(pid, limit=None)
+        ids = [t.get("videoId") for t in pl.get("tracks") or [] if t.get("videoId")]
+        count = max(len(ids), int(pl.get("trackCount") or 0))
+        existing.update(ids)
+        parts.append([part_name(base, n), pid, count])
+        log.info("Playlista '%s': %d utworów", part_name(base, n), count)
+        n += 1
+    return parts, existing
 
 
 AUTH_HINT = (
@@ -239,6 +266,8 @@ Plik robisz raz. Potem program go zapamiętuje.
 
 5. W prawym panelu otwórz zakładkę "Headers" (Nagłówki)
    i znajdź sekcję "Request Headers" (Nagłówki żądania).
+   (Jeśli skopiujesz przy okazji "General" albo "Response Headers",
+   program sam je odfiltruje.)
      - Chrome/Edge: zaznacz myszką całą sekcję Request Headers
        (od pierwszej do ostatniej linii) i skopiuj Ctrl+C.
        Można też włączyć przełącznik "Raw" i skopiować całość.
@@ -271,6 +300,9 @@ Folder wyników    - tu trafia cache (ytm_cache.json) i raport utworów
                     nieznalezionych (ytm_not_found.csv).
 Playlista         - nazwa playlisty. Jeśli nie istnieje, zostanie
                     utworzona (prywatna). Puste = bez playlisty.
+                    YouTube mieści max 5000 utworów na playlistę -
+                    nadmiar trafia automatycznie do "Nazwa 2",
+                    "Nazwa 3" itd. Utwory już obecne są pomijane.
 Polub             - oznacza dopasowane utwory jako "Lubię to".
 Tylko test        - tylko skanuje i szuka, nic nie zmienia na koncie.
                     Nie wymaga pliku autoryzacji. Zalecane na start.
@@ -298,6 +330,32 @@ przerwano w trakcie wyszukiwania).
 """
 
 
+# Nagłówki ŻĄDANIA potrzebne do pracy na koncie. Wszystko inne (sekcja
+# "General" i "Response Headers" skopiowane z Chrome, np. "Request URL",
+# "Status Code", "date", "server") powoduje odrzucenie przez Google (HTTP 400).
+AUTH_HEADERS = frozenset({
+    "accept", "accept-language", "authorization", "content-type", "cookie",
+    "origin", "referer", "user-agent", "x-goog-authuser", "x-goog-pageid",
+    "x-goog-visitor-id", "x-origin", "x-youtube-bootstrap-logged-in",
+    "x-youtube-client-name", "x-youtube-client-version",
+})
+
+
+def clean_headers(data: dict) -> dict[str, str]:
+    return {str(k).strip().lower(): str(v).strip() for k, v in data.items()
+            if str(k).strip().lower() in AUTH_HEADERS}
+
+
+def load_auth(path: Path) -> str:
+    """Oczyszczone nagłówki z browser.json jako JSON dla YTMusic()."""
+    return json.dumps(clean_headers(json.loads(path.read_text(encoding="utf-8"))))
+
+
+def account_label(yt: YTMusic) -> str:
+    info = yt.get_account_info()
+    return f"{info.get('accountName', '?')} ({info.get('channelHandle') or 'bez nazwy kanału'})"
+
+
 def auth_problem(path: Path) -> str | None:
     """Zwraca opis problemu z plikiem browser.json albo None, gdy jest OK."""
     try:
@@ -306,7 +364,7 @@ def auth_problem(path: Path) -> str | None:
         return f"Nie można odczytać pliku autoryzacji: {exc}"
     if not isinstance(data, dict):
         return "Nieprawidłowy format pliku autoryzacji."
-    headers = {str(k).lower(): str(v) for k, v in data.items()}
+    headers = clean_headers(data)
     if "SAPISIDHASH" not in headers.get("authorization", ""):
         return AUTH_HINT
     if "__Secure-3PAPISID" not in headers.get("cookie", ""):
@@ -473,27 +531,61 @@ def run_import(
         return 0
 
     unique = list(dict.fromkeys(found))
-    yt = YTMusic(str(cfg.auth))
+    yt = YTMusic(load_auth(cfg.auth))
+    # Test logowania przed zmianami - zamiast tysięcy błędów jeden czytelny.
+    try:
+        log.info("Konto: %s", account_label(yt))
+    except Exception as exc:
+        log.error("Logowanie do konta nie działa (%s). Utwórz plik autoryzacji "
+                  "ponownie - instrukcja pod przyciskiem '?'.", exc)
+        return 1
+
+    fails = 0
+
+    def failure(msg: str, *args: object) -> None:
+        """Liczy błędy z rzędu; po MAX_FAILS_IN_ROW przerywa zamiast mielić dalej."""
+        nonlocal fails
+        fails += 1
+        log.warning(msg, *args)
+        if fails >= MAX_FAILS_IN_ROW:
+            raise TooManyFailures
+
     try:
         if cfg.playlist:
-            pid = get_or_create_playlist(yt, cfg.playlist)
-            existing = {t.get("videoId") for t in yt.get_playlist(pid, limit=None)["tracks"]}
+            # YouTube: max PLAYLIST_LIMIT utworów na playlistę -> kolejne części
+            # "Nazwa 2", "Nazwa 3"... Utwory z istniejących części są pomijane.
+            parts, existing = load_playlist_parts(yt, cfg.playlist)
             new_ids = [v for v in unique if v not in existing]
             log.info("Do dodania na playlistę: %d (już było: %d)",
                      len(new_ids), len(unique) - len(new_ids))
-            for start in range(0, len(new_ids), BATCH_SIZE):
+            pos = part_i = 0
+            while pos < len(new_ids):
                 check_stop()
-                progress("Playlista", start, len(new_ids))
-                batch = new_ids[start:start + BATCH_SIZE]
+                if part_i >= len(parts):
+                    name = part_name(cfg.playlist, part_i + 1)
+                    parts.append([name, create_playlist(yt, name), 0])
+                name, pid, count = parts[part_i]
+                space = PLAYLIST_LIMIT - count
+                if space <= 0:
+                    part_i += 1
+                    continue
+                progress("Playlista", pos, len(new_ids))
+                batch = new_ids[pos:pos + min(BATCH_SIZE, space)]
+                pos += len(batch)
                 try:
                     resp = yt.add_playlist_items(pid, batch, duplicates=False)
                     if isinstance(resp, dict) and resp.get("status") not in (None, "STATUS_SUCCEEDED"):
-                        log.error("Partia %d: odpowiedź %s", start, resp.get("status"))
+                        failure("'%s': partia odrzucona (%s)", name, resp.get("status"))
                     else:
-                        log.info("Playlista: +%d", len(batch))
+                        fails = 0
+                        parts[part_i][2] += len(batch)
+                        log.info("'%s': +%d (razem %d)", name, len(batch), parts[part_i][2])
+                except TooManyFailures:
+                    raise
                 except Exception as exc:
-                    log.error("Błąd dodawania partii %d: %s", start, exc)
+                    failure("'%s': błąd dodawania partii: %s", name, exc)
                 time.sleep(cfg.delay)
+            progress("Playlista", len(new_ids), len(new_ids))
 
         if cfg.like:
             try:
@@ -505,19 +597,28 @@ def run_import(
             to_like = [v for v in unique if v not in liked]
             log.info("Do polubienia: %d (już polubione: %d)",
                      len(to_like), len(unique) - len(to_like))
+            ok = 0
             for n, vid in enumerate(to_like, 1):
                 check_stop()
                 progress("Polubienia", n, len(to_like))
                 try:
                     yt.rate_song(vid, LikeStatus.LIKE)
+                    ok += 1
+                    fails = 0
                 except Exception as exc:
-                    log.warning("Like nieudany %s: %s", vid, exc)
+                    failure("Like nieudany %s: %s", vid, exc)
                 if n % 50 == 0:
-                    log.info("Polubiono %d", n)
+                    log.info("Polubiono %d z %d", ok, n)
                 time.sleep(cfg.delay)
+            log.info("Polubiono łącznie: %d, nieudane: %d", ok, len(to_like) - ok)
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
+    except TooManyFailures:
+        log.error("%d błędów z rzędu - przerywam. Sprawdź połączenie i plik "
+                  "autoryzacji, potem uruchom ponownie (zrobione rzeczy są pomijane).",
+                  MAX_FAILS_IN_ROW)
+        return 1
 
     log.info("Gotowe.")
     return 0
@@ -626,7 +727,7 @@ def run_gui() -> int:
             if target.suffix.lower() != ".json":
                 target = target / AUTH_NAME if target.is_dir() else target.with_suffix(".json")
             try:
-                headers = json.loads(setup_browser(headers_raw=raw))
+                headers = clean_headers(json.loads(setup_browser(headers_raw=raw)))
             except Exception as exc:
                 messagebox.showerror(APP_NAME, f"Nie udało się:\n{exc}", parent=win)
                 return
@@ -641,7 +742,16 @@ def run_gui() -> int:
                 messagebox.showerror(APP_NAME, f"Nie można zapisać:\n{exc}", parent=win)
                 return
             v_auth.set(str(target))
-            messagebox.showinfo(APP_NAME, f"Zapisano:\n{target}", parent=win)
+            try:
+                who = account_label(YTMusic(json.dumps(headers)))
+            except Exception as exc:
+                messagebox.showwarning(
+                    APP_NAME, f"Zapisano:\n{target}\n\nAle test logowania się nie "
+                    f"udał ({exc}).\nSkopiuj nagłówki ponownie.", parent=win)
+                return
+            messagebox.showinfo(APP_NAME, f"Zapisano:\n{target}\n\nZalogowano jako:\n"
+                                f"{who}\n\nJeśli to nie to konto - przełącz konto na "
+                                "music.youtube.com i skopiuj nagłówki ponownie.", parent=win)
             win.destroy()
 
         bar = ttk.Frame(win)
