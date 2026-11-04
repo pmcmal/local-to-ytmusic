@@ -57,6 +57,8 @@ SEARCH_RETRIES = 3
 MAX_FAILS_IN_ROW = 10
 LATER_ROUNDS = 2       # ile razy na końcu ponowić nieudane polubienia
 LATER_PAUSE_S = 60     # przerwa przed każdą rundą ponawiania
+MAX_AUTO_DELAY = 5.0   # do tylu sekund program sam zwalnia przy błędach
+SESSION_DELAY = 3.0    # minimalne opóźnienie po wygaśnięciu sesji
 
 log = logging.getLogger("ytm")
 
@@ -293,6 +295,14 @@ Plik robisz raz. Potem program go zapamiętuje.
      - Firefox: w "Request Headers" włącz przełącznik "Raw"
        (Nieprzetworzone), zaznacz wszystko i skopiuj Ctrl+C.
 
+   NAJLEPIEJ RÓB TO W OKNIE INCOGNITO (Ctrl+Shift+N), a po zapisaniu
+   pliku zamknij to okno (nie wylogowuj się - tylko zamknij).
+   Otwarta karta YouTube co kilka minut wymienia logowanie i wtedy
+   skopiowany plik przestaje działać ("SESJA WYGASŁA"). Zamknięte okno
+   incognito niczego już nie wymienia, więc plik działa długo.
+   Jeśli sesja wygaśnie w trakcie pracy, program sam otworzy okno do
+   wklejenia nowych nagłówków i po zapisaniu pracuje dalej.
+
 6. W tym programie kliknij "Utwórz z nagłówków...", wklej (Ctrl+V)
    i kliknij "Zapisz". Plik zapisze się w ścieżce z pola
    "Plik autoryzacji" (domyślnie obok programu).
@@ -486,7 +496,8 @@ def search_one(track: Track, delay: float, stop: threading.Event,
     return None
 
 
-def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3):
+def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3,
+               on_error: Callable[[], None] | None = None):
     """YouTube co jakiś czas odrzuca pojedyncze zapytanie - ponów z przerwą."""
     for attempt in range(1, attempts + 1):
         try:
@@ -498,20 +509,30 @@ def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3
                 raise
             pause = 5 * attempt
             log.info("%s: chwilowy błąd (%s) - ponawiam za %d s", what, exc, pause)
+            if on_error:
+                on_error()
             if stop.wait(pause):
                 raise Stopped from exc
     return None
 
 
 ProgressCb = Callable[..., None]  # (etap, przetworzono, z_ilu, [dodatkowy_opis])
+# Prośba o nowy plik autoryzacji (powód) -> ścieżka nowego pliku albo None = rezygnacja.
+RenewCb = Callable[[str], "Path | None"]
 
 
 def run_import(
     cfg: Config,
     stop: threading.Event | None = None,
     progress: ProgressCb | None = None,
+    renew_auth: RenewCb | None = None,
+    on_delay: Callable[[float], None] | None = None,
 ) -> int:
-    """Cały proces. Zwraca kod wyjścia (0 = OK)."""
+    """Cały proces. Zwraca kod wyjścia (0 = OK).
+
+    renew_auth - wołane, gdy sesja wygaśnie; GUI pyta wtedy o nowe nagłówki
+    i praca idzie dalej. on_delay - informacja, że program sam zwiększył opóźnienie.
+    """
     stop = stop or threading.Event()
     progress = progress or (lambda *_: None)
 
@@ -606,32 +627,85 @@ def run_import(
         return 0
 
     unique = list(dict.fromkeys(found))
-    yt = RetryingYTMusic(load_auth(cfg.auth))
-    # Test logowania przed zmianami - zamiast tysięcy błędów jeden czytelny.
-    try:
-        log.info("Konto: %s", account_label(yt))
-    except Exception as exc:
-        log.error("Logowanie do konta nie działa - sesja wygasła albo plik jest zły "
-                  "(%s). Kliknij 'Utwórz z nagłówków...' i wklej świeże nagłówki "
-                  "z music.youtube.com - instrukcja pod przyciskiem '?'.",
-                  str(exc)[:120])
-        return 1
-
+    delay = cfg.delay
     fails = 0
+
+    def slow_down(minimum: float = 0.0) -> None:
+        """YouTube odrzuca zapytania -> zwolnij (do MAX_AUTO_DELAY)."""
+        nonlocal delay
+        new = min(MAX_AUTO_DELAY, max(delay + 1.0, minimum))
+        if new > delay:
+            delay = new
+            log.warning("YouTube ma problemy - zwalniam: opóźnienie %g s", delay)
+            if on_delay:
+                on_delay(delay)
 
     def failure(msg: str, *args: object) -> None:
         """Liczy błędy z rzędu; po MAX_FAILS_IN_ROW przerywa zamiast mielić dalej."""
         nonlocal fails
         fails += 1
         log.warning(msg, *args)
+        slow_down()
         if fails >= MAX_FAILS_IN_ROW:
             raise TooManyFailures
+
+    yt = RetryingYTMusic(load_auth(cfg.auth))
+    account = ""
+
+    def renew(reason: str) -> bool:
+        """Poproś o nowy plik autoryzacji; True = mamy działające logowanie."""
+        nonlocal yt, account
+        while renew_auth is not None and not stop.is_set():
+            path = renew_auth(reason)
+            if path is None:
+                return False
+            try:
+                new_yt = RetryingYTMusic(load_auth(Path(path)))
+                who = account_label(new_yt)
+            except Exception as exc:
+                reason = f"Nowe nagłówki też nie działają ({str(exc)[:100]}). Skopiuj je ponownie."
+                log.error("%s", reason)
+                continue
+            if account and who != account:
+                reason = (f"To inne konto: {who}. Potrzebne: {account}. Przełącz konto "
+                          "na music.youtube.com i skopiuj nagłówki ponownie.")
+                log.error("%s", reason)
+                continue
+            yt, account = new_yt, who
+            log.info("Nowa sesja OK - konto: %s. Kontynuuję.", who)
+            return True
+        return False
+
+    def acc(fn: Callable, what: str):
+        """Zapytanie do konta: ponowienia, zwalnianie i odnowienie wygasłej sesji."""
+        while True:
+            try:
+                return with_retry(lambda: fn(yt), stop, what, on_error=slow_down)
+            except SessionExpired:
+                slow_down(SESSION_DELAY)
+                log.error("SESJA WYGASŁA (HTTP 401) - YouTube wylogował plik autoryzacji.")
+                if not renew("Sesja YouTube wygasła - YouTube wylogował plik autoryzacji. "
+                             "Wklej nowe nagłówki, a program będzie kontynuował."):
+                    raise
+
+    # Test logowania przed zmianami - zamiast tysięcy błędów jeden czytelny.
+    try:
+        account = account_label(yt)
+        log.info("Konto: %s", account)
+    except Exception as exc:
+        log.error("Logowanie do konta nie działa - sesja wygasła albo plik jest zły "
+                  "(%s). Kliknij 'Utwórz z nagłówków...' i wklej świeże nagłówki "
+                  "z music.youtube.com - instrukcja pod przyciskiem '?'.",
+                  str(exc)[:120])
+        if not renew("Logowanie do konta nie działa - sesja wygasła albo plik jest zły. "
+                     "Wklej nowe nagłówki."):
+            return 1
 
     try:
         if cfg.playlist:
             # YouTube: max PLAYLIST_LIMIT utworów na playlistę -> kolejne części
             # "Nazwa 2", "Nazwa 3"... Utwory z istniejących części są pomijane.
-            parts, existing = load_playlist_parts(yt, cfg.playlist)
+            parts, existing = acc(lambda y: load_playlist_parts(y, cfg.playlist), "Playlisty")
             new_ids = [v for v in unique if v not in existing]
             log.info("Do dodania na playlistę: %d (już było: %d)",
                      len(new_ids), len(unique) - len(new_ids))
@@ -640,7 +714,8 @@ def run_import(
                 check_stop()
                 if part_i >= len(parts):
                     name = part_name(cfg.playlist, part_i + 1)
-                    parts.append([name, create_playlist(yt, name), 0])
+                    parts.append([name, acc(lambda y: create_playlist(y, name),
+                                            f"Tworzenie '{name}'"), 0])
                 name, pid, count = parts[part_i]
                 space = PLAYLIST_LIMIT - count
                 if space <= 0:
@@ -650,8 +725,8 @@ def run_import(
                 batch = new_ids[pos:pos + min(BATCH_SIZE, space)]
                 pos += len(batch)
                 try:
-                    resp = with_retry(lambda: yt.add_playlist_items(pid, batch, duplicates=False),
-                                      stop, f"Playlista '{name}'")
+                    resp = acc(lambda y: y.add_playlist_items(pid, batch, duplicates=False),
+                               f"Playlista '{name}'")
                     if isinstance(resp, dict) and resp.get("status") not in (None, "STATUS_SUCCEEDED"):
                         failure("'%s': partia odrzucona (%s)", name, resp.get("status"))
                     else:
@@ -662,7 +737,7 @@ def run_import(
                     raise
                 except Exception as exc:
                     failure("'%s': błąd dodawania partii: %s", name, exc)
-                time.sleep(cfg.delay)
+                time.sleep(delay)
             progress("Playlista", len(new_ids), len(new_ids))
 
         if cfg.like:
@@ -670,8 +745,8 @@ def run_import(
             log.info(msg)
             progress(msg, 0, 0)
             try:
-                liked = {t.get("videoId") for t in with_retry(
-                    lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
+                liked = {t.get("videoId") for t in acc(
+                    lambda y: y.get_liked_songs(limit=None),
                     "Pobieranie polubionych").get("tracks") or []}
             except (Stopped, SessionExpired):
                 raise
@@ -686,9 +761,10 @@ def run_import(
             for n, vid in enumerate(to_like, 1):
                 check_stop()
                 progress("Polubienia", n - 1, len(to_like),
-                         f"polubione: {ok}  |  do ponowienia: {len(later)}")
+                         f"polubione: {ok}  |  do ponowienia: {len(later)}  |  "
+                         f"opóźnienie: {delay:g} s")
                 try:
-                    with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
+                    acc(lambda y: y.rate_song(vid, LikeStatus.LIKE), f"Like {vid}")
                     ok += 1
                     fails = 0
                 except (Stopped, SessionExpired):
@@ -699,7 +775,7 @@ def run_import(
                 if n % 50 == 0:
                     log.info("Przetworzono %d z %d  |  polubione: %d  |  do ponowienia: %d",
                              n, len(to_like), ok, len(later))
-                time.sleep(cfg.delay)
+                time.sleep(delay)
             progress("Polubienia", len(to_like), len(to_like),
                      f"polubione: {ok}  |  do ponowienia: {len(later)}")
 
@@ -717,7 +793,7 @@ def run_import(
                     progress(f"Ponawianie (runda {rnd}/{LATER_ROUNDS})", n - 1, len(later),
                              f"polubione łącznie: {ok}")
                     try:
-                        with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
+                        acc(lambda y: y.rate_song(vid, LikeStatus.LIKE), f"Like {vid}")
                         ok += 1
                         fails = 0
                         log.info("Ponowiony like OK: %s", vid)
@@ -726,7 +802,7 @@ def run_import(
                     except Exception as exc:
                         still.append(vid)
                         failure("Ponowiony like nieudany %s: %s", vid, exc)
-                    time.sleep(cfg.delay)
+                    time.sleep(delay)
                 later = still
 
             log.info("Przetworzono wszystkie: %d  |  YouTube przyjął polubienia: %d  |  "
@@ -737,8 +813,8 @@ def run_import(
             log.info(msg)
             progress(msg, 0, 0)
             try:
-                now = {t.get("videoId") for t in with_retry(
-                    lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
+                now = {t.get("videoId") for t in acc(
+                    lambda y: y.get_liked_songs(limit=None),
                     "Sprawdzanie polubionych").get("tracks") or []}
                 missing = [v for v in unique if v not in now]
                 log.info("SPRAWDZONE NA KONCIE: polubione %d z %d utworów z kolekcji%s",
@@ -1117,11 +1193,33 @@ def run_gui() -> int:
         select(first)
         win.after(100, poll_results)
 
-    def create_auth() -> None:
+    def create_auth(reason: str = "", on_done: Callable[[Path | None], None] | None = None) -> None:
+        """Okno wklejania nagłówków. on_done(ścieżka|None) - gdy wołane z pracującego
+        programu (wygasła sesja): po zapisaniu praca idzie dalej, po Anuluj - przerywa."""
         win = tk.Toplevel(root)
         win.title("Autoryzacja YouTube Music")
         win.transient(root)
         win.grab_set()
+        finished = [False]
+
+        def finish(path: Path | None) -> None:
+            if not finished[0]:
+                finished[0] = True
+                if on_done:
+                    on_done(path)
+            win.destroy()
+
+        if reason:
+            ttk.Label(win, text=reason, foreground="#b00020", justify="left",
+                      wraplength=560, font=("Segoe UI", 10, "bold")).pack(
+                fill="x", padx=10, pady=(10, 0))
+            ttk.Label(
+                win, justify="left", wraplength=560,
+                text=("Rada: żeby sesja nie wygasała, skopiuj nagłówki z OKNA INCOGNITO "
+                      "(Ctrl+Shift+N), a po zapisaniu zamknij to okno (nie wylogowuj się). "
+                      "Otwarta karta YouTube co kilka minut wymienia logowanie i stary "
+                      "plik przestaje działać."),
+            ).pack(fill="x", padx=10, pady=(4, 0))
         top = ttk.Frame(win)
         top.pack(fill="x", padx=10, pady=(10, 4))
         ttk.Label(
@@ -1173,13 +1271,18 @@ def run_gui() -> int:
                 return
             messagebox.showinfo(APP_NAME, f"Zapisano:\n{target}\n\nZalogowano jako:\n"
                                 f"{who}\n\nJeśli to nie to konto - przełącz konto na "
-                                "music.youtube.com i skopiuj nagłówki ponownie.", parent=win)
-            win.destroy()
+                                "music.youtube.com i skopiuj nagłówki ponownie."
+                                + ("\n\nProgram kontynuuje pracę." if on_done else ""),
+                                parent=win)
+            finish(target)
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(4, 10))
         ttk.Button(bar, text="Zapisz", command=save).pack(side="right")
-        ttk.Button(bar, text="Anuluj", command=win.destroy).pack(side="right", padx=6)
+        ttk.Button(bar, text="Anuluj" + (" (przerwij pracę)" if on_done else ""),
+                   command=lambda: finish(None)).pack(side="right", padx=6)
+        win.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+        txt.focus_set()
 
     r = 0
     ttk.Label(frm, text="Folder z muzyką:").grid(row=r, column=0, sticky="w", pady=3)
@@ -1323,9 +1426,27 @@ def run_gui() -> int:
         def progress(stage: str, i: int, n: int, extra: str = "") -> None:
             events.put(("progress", (stage, i, n, extra)))
 
+        def renew_auth(reason: str) -> Path | None:
+            """Z wątku pracy: poproś GUI o nowe nagłówki i czekaj na odpowiedź."""
+            box: list[Path | None] = [None]
+            answered = threading.Event()
+
+            def done(path: Path | None) -> None:
+                box[0] = path
+                answered.set()
+
+            events.put(("renew", (reason, done)))
+            while not answered.wait(0.5):
+                if stop_event.is_set():
+                    return None
+            return box[0]
+
+        def on_delay(d: float) -> None:
+            events.put(("delay", d))
+
         def work() -> None:
             try:
-                code = run_import(cfg, stop_event, progress)
+                code = run_import(cfg, stop_event, progress, renew_auth, on_delay)
             except Exception as exc:
                 log.exception("Błąd: %s", exc)
                 code = 1
@@ -1373,6 +1494,16 @@ def run_gui() -> int:
                     else:
                         v_status.set(f"{stage} - przetworzono {i}/{n}"
                                      + (f"  |  {extra}" if extra else ""))
+                elif kind == "renew":
+                    reason, done = payload
+                    v_status.set("Sesja wygasła - wklej nowe nagłówki (praca wstrzymana)")
+                    root.deiconify()
+                    root.lift()
+                    root.bell()
+                    create_auth(reason, done)
+                elif kind == "delay":
+                    v_delay.set(f"{payload:g}")
+                    save_settings()
                 elif kind == "done":
                     b_start.config(state="normal")
                     b_fix.config(state="normal")
