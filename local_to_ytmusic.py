@@ -645,6 +645,9 @@ def run_import(
             progress("Playlista", len(new_ids), len(new_ids))
 
         if cfg.like:
+            msg = "Pobieram listę polubionych z konta (to trwa 1-2 min, program pracuje)..."
+            log.info(msg)
+            progress(msg, 0, 0)
             try:
                 liked = {t.get("videoId") for t in with_retry(
                     lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
@@ -709,7 +712,9 @@ def run_import(
                      "nieudane: %d", len(to_like), ok, len(later))
 
             # Sprawdzenie na koncie: czy utwory faktycznie są na liście polubionych.
-            progress("Sprawdzanie na koncie", 0, 1)
+            msg = "Sprawdzam polubione na koncie (to trwa 1-2 min, program pracuje)..."
+            log.info(msg)
+            progress(msg, 0, 0)
             try:
                 now = {t.get("videoId") for t in with_retry(
                     lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
@@ -723,7 +728,7 @@ def run_import(
                 raise
             except Exception as exc:
                 log.warning("Nie udało się sprawdzić polubionych na koncie: %s", exc)
-            progress("Sprawdzanie na koncie", 1, 1)
+            progress("Sprawdzanie na koncie - zakończone", 1, 1)
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
@@ -1334,8 +1339,11 @@ def run_gui() -> int:
                 elif kind == "progress":
                     stage, i, n, extra = payload
                     pbar.config(maximum=max(n, 1), value=i)
-                    v_status.set(f"{stage} - przetworzono {i}/{n}"
-                                 + (f"  |  {extra}" if extra else ""))
+                    if n == 0:  # etap bez licznika - sam opis
+                        v_status.set(stage)
+                    else:
+                        v_status.set(f"{stage} - przetworzono {i}/{n}"
+                                     + (f"  |  {extra}" if extra else ""))
                 elif kind == "done":
                     b_start.config(state="normal")
                     b_fix.config(state="normal")
