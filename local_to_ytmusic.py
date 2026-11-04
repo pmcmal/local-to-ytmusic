@@ -323,6 +323,20 @@ Czas (orientacyjnie, 7000 utworów, 4 wątki):
 Artysta i tytuł są brane z tagów. Gdy ich brak, z nazwy pliku
 w formacie "Artysta - Tytuł" (numer ścieżki z przodu jest pomijany).
 
+POPRAW NIEROZPOZNANE
+Po wyszukiwaniu kliknij "Popraw nierozpoznane...". Dla każdego
+utworu, którego program nie znalazł:
+  - popraw tekst w polu "Szukaj" (np. sam tytuł, inna pisownia)
+    i naciśnij Enter,
+  - zmień typ na "Filmy" lub "Wszystko", jeśli utworu nie ma jako
+    "utwór" (np. teledyski, nagrania koncertowe),
+  - "Odsłuchaj w przeglądarce" - sprawdź, czy to ten kawałek,
+  - "Użyj zaznaczonego" (albo dwuklik) - przypisz i przejdź dalej,
+  - albo znajdź sam na YouTube i wklej link w "Lub wklej link".
+"Pomiń" przechodzi dalej bez przypisania. Poprawki zapisują się od
+razu - potem kliknij Start, żeby je polubić / dodać do playlisty
+(reszta jest pomijana, więc idzie szybko).
+
 Cache: utwory już wyszukane nie są szukane ponownie przy kolejnym
 uruchomieniu. Usuń ytm_cache.json, żeby wyszukać wszystko od nowa.
 Stop przerywa pracę i zapisuje postęp (bez zmian na koncie, jeśli
@@ -425,6 +439,21 @@ def search_one(track: Track, delay: float, stop: threading.Event,
             continue
         stop.wait(delay)
         return vid
+    return None
+
+
+def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3):
+    """YouTube co jakiś czas odrzuca pojedyncze zapytanie - ponów z przerwą."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == attempts:
+                raise
+            pause = 5 * attempt
+            log.info("%s: chwilowy błąd (%s) - ponawiam za %d s", what, exc, pause)
+            if stop.wait(pause):
+                raise Stopped from exc
     return None
 
 
@@ -573,14 +602,15 @@ def run_import(
                 batch = new_ids[pos:pos + min(BATCH_SIZE, space)]
                 pos += len(batch)
                 try:
-                    resp = yt.add_playlist_items(pid, batch, duplicates=False)
+                    resp = with_retry(lambda: yt.add_playlist_items(pid, batch, duplicates=False),
+                                      stop, f"Playlista '{name}'")
                     if isinstance(resp, dict) and resp.get("status") not in (None, "STATUS_SUCCEEDED"):
                         failure("'%s': partia odrzucona (%s)", name, resp.get("status"))
                     else:
                         fails = 0
                         parts[part_i][2] += len(batch)
                         log.info("'%s': +%d (razem %d)", name, len(batch), parts[part_i][2])
-                except TooManyFailures:
+                except (TooManyFailures, Stopped):
                     raise
                 except Exception as exc:
                     failure("'%s': błąd dodawania partii: %s", name, exc)
@@ -589,8 +619,11 @@ def run_import(
 
         if cfg.like:
             try:
-                liked = {t.get("videoId")
-                         for t in yt.get_liked_songs(limit=None).get("tracks") or []}  # type: ignore[arg-type]
+                liked = {t.get("videoId") for t in with_retry(
+                    lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
+                    "Pobieranie polubionych").get("tracks") or []}
+            except Stopped:
+                raise
             except Exception as exc:
                 log.warning("Nie udało się pobrać polubionych (%s) - lubię wszystkie.", exc)
                 liked = set()
@@ -600,11 +633,13 @@ def run_import(
             ok = 0
             for n, vid in enumerate(to_like, 1):
                 check_stop()
-                progress("Polubienia", n, len(to_like))
+                progress(f"Polubienia (udane: {ok}, nieudane: {n - 1 - ok})", n, len(to_like))
                 try:
-                    yt.rate_song(vid, LikeStatus.LIKE)
+                    with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
                     ok += 1
                     fails = 0
+                except Stopped:
+                    raise
                 except Exception as exc:
                     failure("Like nieudany %s: %s", vid, exc)
                 if n % 50 == 0:
@@ -646,7 +681,7 @@ def run_gui() -> int:
 
     root = tk.Tk()
     root.title(APP_NAME)
-    root.minsize(640, 520)
+    root.minsize(820, 520)
 
     v_folder = tk.StringVar(value=st.get("folder", ""))
     v_auth = tk.StringVar(value=st.get("auth", str(base / AUTH_NAME)))
@@ -697,6 +732,281 @@ def run_gui() -> int:
                    command=lambda: webbrowser.open("https://music.youtube.com")
                    ).pack(side="left")
         ttk.Button(bar, text="Zamknij", command=win.destroy).pack(side="right")
+
+    def open_fixer() -> None:
+        """Ręczne poprawianie nierozpoznanych utworów, po kolei."""
+        out = Path(v_out.get().strip() or base)
+        report, cache_path = out / REPORT_NAME, out / CACHE_NAME
+        if not report.is_file() or not cache_path.is_file():
+            messagebox.showinfo(APP_NAME, "Najpierw uruchom wyszukiwanie (Start) - "
+                                "lista nierozpoznanych powstanie po nim.")
+            return
+        with report.open(encoding="utf-8-sig", newline="") as fh:
+            rows = list(csv.reader(fh, delimiter=";"))[1:]
+        items = [Track(r[0], r[1]) for r in rows if len(r) >= 2 and r[1].strip()]
+        if not items:
+            messagebox.showinfo(APP_NAME, "Brak nierozpoznanych utworów.")
+            return
+        cache = load_cache(cache_path)
+
+        win = tk.Toplevel(root)
+        win.title("Popraw nierozpoznane")
+        win.geometry("1000x560")
+        win.minsize(800, 450)
+        win.transient(root)
+        win.grab_set()
+
+        v_info = tk.StringVar()
+        v_query = tk.StringVar()
+        v_filter = tk.StringVar(value="Utwory")
+        v_link = tk.StringVar()
+        v_st = tk.StringVar()
+        filters = {"Utwory": "songs", "Filmy": "videos", "Wszystko": None}
+
+        ttk.Label(win, textvariable=v_info, padding=(10, 8, 10, 0)).pack(anchor="w")
+        pane = ttk.PanedWindow(win, orient="horizontal")
+        pane.pack(fill="both", expand=True, padx=10, pady=6)
+
+        left = ttk.Frame(pane)
+        lb = tk.Listbox(left, activestyle="dotbox", exportselection=False, width=42)
+        lsb = ttk.Scrollbar(left, orient="vertical", command=lb.yview)
+        lb.config(yscrollcommand=lsb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        lsb.pack(side="right", fill="y")
+        pane.add(left, weight=1)
+
+        right = ttk.Frame(pane, padding=(8, 0, 0, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(2, weight=1)
+        pane.add(right, weight=3)
+
+        lbl_cur = ttk.Label(right, text="", font=("Segoe UI", 11, "bold"))
+        lbl_cur.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 6))
+
+        qrow = ttk.Frame(right)
+        qrow.grid(row=1, column=0, columnspan=4, sticky="ew")
+        qrow.columnconfigure(1, weight=1)
+        ttk.Label(qrow, text="Szukaj:").grid(row=0, column=0, padx=(0, 4))
+        e_query = ttk.Entry(qrow, textvariable=v_query)
+        e_query.grid(row=0, column=1, sticky="ew")
+        ttk.Combobox(qrow, textvariable=v_filter, values=list(filters), width=9,
+                     state="readonly").grid(row=0, column=2, padx=4)
+        b_search = ttk.Button(qrow, text="Szukaj")
+        b_search.grid(row=0, column=3)
+
+        cols = ("artist", "title", "album", "time", "type")
+        tv = ttk.Treeview(right, columns=cols, show="headings", selectmode="browse")
+        for c, label, w in zip(cols, ("Artysta", "Tytuł", "Album", "Czas", "Typ"),
+                               (170, 230, 160, 55, 60)):
+            tv.heading(c, text=label)
+            tv.column(c, width=w, stretch=c in ("artist", "title", "album"))
+        tv.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=6)
+        tsb = ttk.Scrollbar(right, orient="vertical", command=tv.yview)
+        tv.config(yscrollcommand=tsb.set)
+        tsb.grid(row=2, column=3, sticky="ns", pady=6)
+
+        acts = ttk.Frame(right)
+        acts.grid(row=3, column=0, columnspan=4, sticky="ew")
+        b_use = ttk.Button(acts, text="✓ Użyj zaznaczonego")
+        b_play = ttk.Button(acts, text="▶ Odsłuchaj w przeglądarce")
+        b_prev = ttk.Button(acts, text="← Poprzedni")
+        b_next = ttk.Button(acts, text="Pomiń →")
+        b_clear = ttk.Button(acts, text="Usuń przypisanie")
+        b_use.pack(side="left")
+        b_play.pack(side="left", padx=6)
+        b_next.pack(side="right")
+        b_prev.pack(side="right", padx=6)
+        b_clear.pack(side="right")
+
+        lrow = ttk.Frame(right)
+        lrow.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        lrow.columnconfigure(1, weight=1)
+        ttk.Label(lrow, text="Lub wklej link YouTube:").grid(row=0, column=0, padx=(0, 4))
+        ttk.Entry(lrow, textvariable=v_link).grid(row=0, column=1, sticky="ew")
+        b_link = ttk.Button(lrow, text="Użyj linku")
+        b_link.grid(row=0, column=2, padx=(4, 0))
+
+        ttk.Label(right, textvariable=v_st, foreground="#555").grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
+        bottom.pack(fill="x")
+        ttk.Label(bottom, text="Poprawki zapisują się od razu. Kliknij potem Start w "
+                  "głównym oknie, żeby je polubić / dodać do playlisty.",
+                  foreground="#555").pack(side="left")
+        b_close = ttk.Button(bottom, text="Zamknij")
+        b_close.pack(side="right")
+
+        state = {"i": 0, "token": 0, "results": [], "client": None}
+        results_q: queue.Queue = queue.Queue()
+
+        def label_for(t: Track) -> str:
+            mark = "✓ " if cache.get(t.key) else "   "
+            return f"{mark}{t.artist} - {t.title}" if t.artist else f"{mark}{t.title}"
+
+        def refresh_info() -> None:
+            fixed = sum(1 for t in items if cache.get(t.key))
+            v_info.set(f"Nierozpoznane: {len(items)}  |  poprawione: {fixed}  |  "
+                       f"zostało: {len(items) - fixed}")
+
+        for t in items:
+            lb.insert("end", label_for(t))
+
+        def update_row(i: int) -> None:
+            lb.delete(i)
+            lb.insert(i, label_for(items[i]))
+            if cache.get(items[i].key):
+                lb.itemconfig(i, foreground="#0a7d22")
+
+        for i in range(len(items)):
+            if cache.get(items[i].key):
+                lb.itemconfig(i, foreground="#0a7d22")
+
+        def select(i: int) -> None:
+            if not items:
+                return
+            i = max(0, min(i, len(items) - 1))
+            state["i"] = i
+            lb.selection_clear(0, "end")
+            lb.selection_set(i)
+            lb.see(i)
+            t = items[i]
+            lbl_cur.config(text=f"{t.artist} - {t.title}" if t.artist else t.title)
+            v_query.set(t.query)
+            v_link.set("")
+            vid = cache.get(t.key)
+            v_st.set(f"Przypisano: https://music.youtube.com/watch?v={vid}" if vid else "")
+            search()
+
+        def search() -> None:
+            q = v_query.get().strip()
+            if not q:
+                return
+            state["token"] += 1
+            token = state["token"]
+            flt = filters[v_filter.get()]
+            tv.delete(*tv.get_children())
+            v_st.set("Szukam...")
+
+            def work() -> None:
+                try:
+                    if state["client"] is None:
+                        state["client"] = YTMusic()
+                    res = state["client"].search(q, filter=flt, limit=20)
+                    results_q.put((token, [r for r in res if r.get("videoId")], None))
+                except Exception as exc:
+                    results_q.put((token, [], exc))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def poll_results() -> None:
+            try:
+                while True:
+                    token, res, err = results_q.get_nowait()
+                    if token != state["token"]:
+                        continue  # wynik starego wyszukiwania
+                    state["results"] = res
+                    tv.delete(*tv.get_children())
+                    for n, r in enumerate(res):
+                        artists = ", ".join(a.get("name", "") for a in r.get("artists") or [])
+                        album = (r.get("album") or {}).get("name", "") if isinstance(r.get("album"), dict) else ""
+                        tv.insert("", "end", iid=str(n), values=(
+                            artists, r.get("title", ""), album, r.get("duration", ""),
+                            {"song": "utwór", "video": "film"}.get(r.get("resultType"), r.get("resultType", ""))))
+                    if err:
+                        v_st.set(f"Błąd wyszukiwania: {err} - spróbuj ponownie.")
+                    elif not res:
+                        v_st.set("Brak wyników - zmień zapytanie albo typ (Filmy / Wszystko).")
+                    else:
+                        cur = cache.get(items[state["i"]].key)
+                        v_st.set(f"Wyników: {len(res)}. Dwuklik lub '✓ Użyj' = przypisz."
+                                 + (f"  (obecnie przypisano: {cur})" if cur else ""))
+                        tv.selection_set("0")
+                        tv.focus("0")
+            except queue.Empty:
+                pass
+            if win.winfo_exists():
+                win.after(100, poll_results)
+
+        def assign(vid: str | None) -> None:
+            t = items[state["i"]]
+            cache[t.key] = vid
+            try:
+                save_cache(cache_path, cache)
+            except OSError as exc:
+                messagebox.showerror(APP_NAME, f"Nie można zapisać cache:\n{exc}", parent=win)
+                return
+            update_row(state["i"])
+            refresh_info()
+            if vid:
+                log.info("Ręcznie przypisano: %s -> %s", t.query, vid)
+                select(state["i"] + 1)
+            else:
+                v_st.set("Usunięto przypisanie.")
+
+        def selected_vid() -> str | None:
+            sel = tv.selection()
+            if not sel:
+                return None
+            return state["results"][int(sel[0])].get("videoId")
+
+        def use_selected() -> None:
+            vid = selected_vid()
+            if vid:
+                assign(vid)
+            else:
+                v_st.set("Zaznacz wynik na liście.")
+
+        def play() -> None:
+            vid = selected_vid() or cache.get(items[state["i"]].key)
+            if vid:
+                webbrowser.open(f"https://music.youtube.com/watch?v={vid}")
+
+        def use_link() -> None:
+            text = v_link.get().strip()
+            m_ = re.search(r"(?:v=|youtu\.be/|/watch/|/shorts/)([\w-]{11})", text) or \
+                re.fullmatch(r"([\w-]{11})", text)
+            if not m_:
+                messagebox.showerror(APP_NAME, "Nie rozpoznano linku.\nPrzykład: "
+                                     "https://music.youtube.com/watch?v=dQw4w9WgXcQ", parent=win)
+                return
+            assign(m_.group(1))
+
+        def on_list_select(_e: object = None) -> None:
+            sel = lb.curselection()
+            if sel and sel[0] != state["i"]:
+                select(sel[0])
+
+        def close() -> None:
+            # Raport braków = to, co nadal nie ma przypisania.
+            try:
+                with report.open("w", newline="", encoding="utf-8-sig") as fh:
+                    w = csv.writer(fh, delimiter=";")
+                    w.writerow(["artist", "title"])
+                    w.writerows((t.artist, t.title) for t in items if not cache.get(t.key))
+            except OSError:
+                pass
+            win.destroy()
+
+        b_search.config(command=search)
+        b_use.config(command=use_selected)
+        b_play.config(command=play)
+        b_prev.config(command=lambda: select(state["i"] - 1))
+        b_next.config(command=lambda: select(state["i"] + 1))
+        b_clear.config(command=lambda: assign(None))
+        b_link.config(command=use_link)
+        b_close.config(command=close)
+        win.protocol("WM_DELETE_WINDOW", close)
+        e_query.bind("<Return>", lambda _e: search())
+        tv.bind("<Double-1>", lambda _e: use_selected())
+        tv.bind("<Return>", lambda _e: use_selected())
+        lb.bind("<<ListboxSelect>>", on_list_select)
+
+        refresh_info()
+        first = next((i for i, t in enumerate(items) if not cache.get(t.key)), 0)
+        state["i"] = -1
+        select(first)
+        win.after(100, poll_results)
 
     def create_auth() -> None:
         win = tk.Toplevel(root)
@@ -800,6 +1110,7 @@ def run_gui() -> int:
     b_start = ttk.Button(btns, text="Start")
     b_stop = ttk.Button(btns, text="Stop", state="disabled")
     b_report = ttk.Button(btns, text="Otwórz raport braków")
+    b_fix = ttk.Button(btns, text="Popraw nierozpoznane...", command=open_fixer)
     b_folder = ttk.Button(btns, text="Otwórz folder wyników")
     b_help = ttk.Button(btns, text="Pomoc", command=show_help)
     b_start.pack(side="left")
@@ -807,6 +1118,7 @@ def run_gui() -> int:
     b_help.pack(side="right")
     b_folder.pack(side="right", padx=6)
     b_report.pack(side="right", padx=6)
+    b_fix.pack(side="left", padx=(12, 0))
 
     r += 1
     pbar = ttk.Progressbar(frm, mode="determinate")
@@ -892,6 +1204,7 @@ def run_gui() -> int:
         save_settings()
         stop_event.clear()
         b_start.config(state="disabled")
+        b_fix.config(state="disabled")  # nie edytuj cache podczas pracy
         b_stop.config(state="normal")
         pbar.config(value=0)
 
@@ -946,6 +1259,7 @@ def run_gui() -> int:
                     v_status.set(f"{stage}: {i}/{n}")
                 elif kind == "done":
                     b_start.config(state="normal")
+                    b_fix.config(state="normal")
                     b_stop.config(state="disabled")
                     v_status.set({0: "Gotowe.", 130: "Przerwano."}.get(payload, "Błąd - zobacz log."))
         except queue.Empty:
