@@ -394,6 +394,26 @@ def auth_problem(path: Path) -> str | None:
     return None
 
 
+class RetryingYTMusic(YTMusic):
+    """YTMusic, który ponawia pojedyncze zapytania odrzucone chwilowo przez YouTube
+    (pusta/HTML odpowiedź, HTTP 429/5xx, zerwane połączenie). Dzięki temu np. długa
+    lista polubionych (dziesiątki stron) nie pada przez jedną złą stronę."""
+
+    REQUEST_TRIES = 4
+
+    def _send_request(self, endpoint: str, body: dict, additionalParams: str = "") -> dict:
+        for attempt in range(1, self.REQUEST_TRIES + 1):
+            try:
+                return super()._send_request(endpoint, body, additionalParams)
+            except Exception as exc:
+                transient = isinstance(exc, (json.JSONDecodeError, OSError)) or any(
+                    f"HTTP {c}" in str(exc) for c in (429, 500, 502, 503, 504))
+                if not transient or attempt == self.REQUEST_TRIES:
+                    raise
+                time.sleep(1.5 * attempt)
+        raise RuntimeError("unreachable")
+
+
 class Throttle:
     """Wspólna dla wątków pauza, gdy YouTube zaczyna odrzucać zapytania."""
 
@@ -422,7 +442,7 @@ def _search_client() -> YTMusic:
     """Osobny, niezalogowany klient na wątek - wyszukiwanie nie obciąża konta."""
     yt = getattr(_local, "yt", None)
     if yt is None:
-        yt = _local.yt = YTMusic()
+        yt = _local.yt = RetryingYTMusic()
     return yt
 
 
@@ -464,7 +484,7 @@ def with_retry(fn: Callable, stop: threading.Event, what: str, attempts: int = 3
     return None
 
 
-ProgressCb = Callable[[str, int, int], None]
+ProgressCb = Callable[..., None]  # (etap, przetworzono, z_ilu, [dodatkowy_opis])
 
 
 def run_import(
@@ -567,7 +587,7 @@ def run_import(
         return 0
 
     unique = list(dict.fromkeys(found))
-    yt = YTMusic(load_auth(cfg.auth))
+    yt = RetryingYTMusic(load_auth(cfg.auth))
     # Test logowania przed zmianami - zamiast tysięcy błędów jeden czytelny.
     try:
         log.info("Konto: %s", account_label(yt))
@@ -641,8 +661,8 @@ def run_import(
             later: list[str] = []  # nieudane - ponowione na końcu, po przerwie
             for n, vid in enumerate(to_like, 1):
                 check_stop()
-                progress(f"Polubienia (udane: {ok}, do ponowienia: {len(later)})",
-                         n, len(to_like))
+                progress("Polubienia", n - 1, len(to_like),
+                         f"polubione: {ok}  |  do ponowienia: {len(later)}")
                 try:
                     with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
                     ok += 1
@@ -653,8 +673,11 @@ def run_import(
                     later.append(vid)
                     failure("Like nieudany %s: %s - ponowię później", vid, exc)
                 if n % 50 == 0:
-                    log.info("Polubiono %d z %d", ok, n)
+                    log.info("Przetworzono %d z %d  |  polubione: %d  |  do ponowienia: %d",
+                             n, len(to_like), ok, len(later))
                 time.sleep(cfg.delay)
+            progress("Polubienia", len(to_like), len(to_like),
+                     f"polubione: {ok}  |  do ponowienia: {len(later)}")
 
             for rnd in range(1, LATER_ROUNDS + 1):
                 if not later:
@@ -667,7 +690,8 @@ def run_import(
                 still: list[str] = []
                 for n, vid in enumerate(later, 1):
                     check_stop()
-                    progress(f"Ponawianie {rnd}/{LATER_ROUNDS} (udane: {ok})", n, len(later))
+                    progress(f"Ponawianie (runda {rnd}/{LATER_ROUNDS})", n - 1, len(later),
+                             f"polubione łącznie: {ok}")
                     try:
                         with_retry(lambda: yt.rate_song(vid, LikeStatus.LIKE), stop, f"Like {vid}")
                         ok += 1
@@ -681,9 +705,25 @@ def run_import(
                     time.sleep(cfg.delay)
                 later = still
 
-            log.info("Polubiono łącznie: %d z %d%s", ok, len(to_like),
-                     f" | nadal nieudane: {len(later)} (uruchom Start ponownie później)"
-                     if later else " - wszystkie udane.")
+            log.info("Przetworzono wszystkie: %d  |  YouTube przyjął polubienia: %d  |  "
+                     "nieudane: %d", len(to_like), ok, len(later))
+
+            # Sprawdzenie na koncie: czy utwory faktycznie są na liście polubionych.
+            progress("Sprawdzanie na koncie", 0, 1)
+            try:
+                now = {t.get("videoId") for t in with_retry(
+                    lambda: yt.get_liked_songs(limit=None), stop,  # type: ignore[arg-type]
+                    "Sprawdzanie polubionych").get("tracks") or []}
+                missing = [v for v in unique if v not in now]
+                log.info("SPRAWDZONE NA KONCIE: polubione %d z %d utworów z kolekcji%s",
+                         len(unique) - len(missing), len(unique),
+                         f"  |  brakuje: {len(missing)} - kliknij Start ponownie później"
+                         if missing else "  - komplet.")
+            except Stopped:
+                raise
+            except Exception as exc:
+                log.warning("Nie udało się sprawdzić polubionych na koncie: %s", exc)
+            progress("Sprawdzanie na koncie", 1, 1)
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
@@ -929,7 +969,7 @@ def run_gui() -> int:
             def work() -> None:
                 try:
                     if state["client"] is None:
-                        state["client"] = YTMusic()
+                        state["client"] = RetryingYTMusic()
                     res = state["client"].search(q, filter=flt, limit=20)
                     results_q.put((token, [r for r in res if r.get("videoId")], None))
                 except Exception as exc:
@@ -1091,7 +1131,7 @@ def run_gui() -> int:
                 return
             v_auth.set(str(target))
             try:
-                who = account_label(YTMusic(json.dumps(headers)))
+                who = account_label(RetryingYTMusic(json.dumps(headers)))
             except Exception as exc:
                 messagebox.showwarning(
                     APP_NAME, f"Zapisano:\n{target}\n\nAle test logowania się nie "
@@ -1246,8 +1286,8 @@ def run_gui() -> int:
         b_stop.config(state="normal")
         pbar.config(value=0)
 
-        def progress(stage: str, i: int, n: int) -> None:
-            events.put(("progress", (stage, i, n)))
+        def progress(stage: str, i: int, n: int, extra: str = "") -> None:
+            events.put(("progress", (stage, i, n, extra)))
 
         def work() -> None:
             try:
@@ -1292,9 +1332,10 @@ def run_gui() -> int:
                 if kind == "log":
                     append_log(payload)
                 elif kind == "progress":
-                    stage, i, n = payload
+                    stage, i, n, extra = payload
                     pbar.config(maximum=max(n, 1), value=i)
-                    v_status.set(f"{stage}: {i}/{n}")
+                    v_status.set(f"{stage} - przetworzono {i}/{n}"
+                                 + (f"  |  {extra}" if extra else ""))
                 elif kind == "done":
                     b_start.config(state="normal")
                     b_fix.config(state="normal")
