@@ -1,0 +1,17 @@
+# Dane logowania i dane użytkownika - NIGDY do repo
+browser.json
+*.json
+ytm_cache.json
+ytm_settings.json
+ytm_not_found.csv
+ytm.log
+
+# Python / budowanie
+.venv/
+venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+build.log
