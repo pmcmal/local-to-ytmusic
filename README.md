@@ -82,6 +82,8 @@ Pasek na dole pokazuje postęp:
 
 Gdy w trakcie wygaśnie sesja, program wstrzyma pracę i otworzy okno do wklejenia nowych nagłówków. Po zapisaniu pracuje dalej od tego samego miejsca. Nie przyjmie nagłówków z innego konta.
 
+> **Im więcej utworów przerobisz na jednej sesji, tym częściej YouTube może ją wylogowywać.** Przy dużej kolekcji (tysiące polubień) okno z prośbą o nowe nagłówki może pojawić się kilka razy. To normalne: wklej świeże nagłówki z nowego okna incognito i program jedzie dalej. Pomaga też większe opóźnienie (3 s) albo podzielenie pracy na kilka podejść (**Stop**, a później **Start**).
+
 ### 5. Popraw nierozpoznane
 
 Kliknij **Popraw nierozpoznane...**. Dla każdego nieznalezionego utworu możesz:
@@ -225,6 +227,8 @@ The app authenticates like your browser does: with request headers copied from a
 | `SPRAWDZONE NA KONCIE: polubione X z Y` | final result, verified on your account |
 
 If the session expires mid-run, the app pauses and opens the header dialog. After you save, it continues where it left off. Headers from a different account are rejected.
+
+> **The more tracks you process in one session, the more often YouTube may log it out.** With a large collection (thousands of likes) the new-headers dialog may pop up several times. That's normal: paste fresh headers from a new incognito window and the app carries on. A longer delay (3 s) or splitting the work into several runs (**Stop**, then **Start** later) also helps.
 
 ### 5. Fix unrecognized tracks
 
