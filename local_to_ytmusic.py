@@ -43,6 +43,7 @@ from ytmusicapi import LikeStatus, YTMusic
 from ytmusicapi.auth.browser import setup_browser
 
 APP_NAME = "Local → YouTube Music"
+__version__ = "1.0.0"
 AUDIO_EXT: frozenset[str] = frozenset({".flac", ".mp3"})
 CACHE_NAME = "ytm_cache.json"
 REPORT_NAME = "ytm_not_found.csv"
@@ -872,7 +873,7 @@ def run_gui() -> int:
     st = load_settings()
 
     root = tk.Tk()
-    root.title(APP_NAME)
+    root.title(f"{APP_NAME} {__version__}")
     root.minsize(820, 520)
 
     v_folder = tk.StringVar(value=st.get("folder", ""))
@@ -1542,6 +1543,7 @@ def run_gui() -> int:
 def run_cli(argv: list[str]) -> int:
     base = app_dir()
     ap = argparse.ArgumentParser(description=(__doc__ or APP_NAME).split("\n")[0])
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("folder", type=Path)
     ap.add_argument("--auth", type=Path, default=base / AUTH_NAME)
     ap.add_argument("--out", type=Path, default=base, help="folder na cache i raport")

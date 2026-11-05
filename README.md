@@ -147,7 +147,7 @@ python local_to_ytmusic.py "D:\Muzyka" --dry-run
 python local_to_ytmusic.py "D:\Muzyka" --like --playlist "Moja kolekcja" --delay 3
 ```
 
-Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `-h`.
+Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--version`, `-h`.
 
 ## Uwagi
 
@@ -289,7 +289,7 @@ python local_to_ytmusic.py "D:\Music" --dry-run
 python local_to_ytmusic.py "D:\Music" --like --playlist "My collection" --delay 3
 ```
 
-Options: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `-h`.
+Options: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--version`, `-h`.
 
 ## Notes
 
