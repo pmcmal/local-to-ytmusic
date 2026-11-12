@@ -25,6 +25,7 @@ Moves your local music collection (FLAC / MP3) to **YouTube Music**: finds every
   - gdy sesja wygaśnie, **prosi o nowe logowanie i pracuje dalej**.
 - Na końcu **sprawdza na koncie**, ile utworów faktycznie jest polubionych.
 - Zapamiętuje wyniki wyszukiwania, więc kolejne uruchomienie przerabia tylko nowe utwory.
+- Interfejs po polsku i angielsku (przełącznik **PL / EN** w prawym górnym rogu okna; przy pierwszym uruchomieniu wybiera język Windows).
 
 ## Pierwsze uruchomienie, krok po kroku
 
@@ -110,6 +111,7 @@ Kliknij **Popraw nierozpoznane...**. Dla każdego nieznalezionego utworu możesz
 | Tylko test | tylko skan i wyszukiwanie, bez zmian na koncie i bez logowania |
 | Opóźnienie [s] | przerwa między zapytaniami; przy dużej kolekcji polecane **3 s**; program sam podnosi je przy błędach (do 5 s) |
 | Wątki | ile wyszukiwań naraz (1–8, domyślnie 4) |
+| PL / EN | język programu |
 
 **Ile to trwa?** Przy ok. 5000 utworów wyszukiwanie zajmuje kilkadziesiąt minut, a polubienia kilka godzin, bo YouTube pozwala lubić tylko pojedynczo. Program można przerwać (**Stop**) i wznowić później: zrobione rzeczy są pomijane.
 
@@ -149,7 +151,7 @@ python local_to_ytmusic.py "D:\Muzyka" --dry-run
 python local_to_ytmusic.py "D:\Muzyka" --like --playlist "Moja kolekcja" --delay 3
 ```
 
-Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--version`, `-h`.
+Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--lang pl|en`, `--version`, `-h`.
 
 ## Uwagi
 
@@ -165,7 +167,7 @@ Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--dela
 <details>
 <summary><b>🇬🇧 English</b></summary>
 
-> The app's interface is in Polish. Button names are given below in Polish with English translations.
+> The app is available in **English and Polish**. Switch with the **PL / EN** box in the top-right corner of the main window. On first run it follows your Windows language.
 
 ## Features
 
@@ -173,7 +175,7 @@ Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--dela
 - Reads artist/title from tags, falling back to the `Artist - Title` file name (a leading track number is ignored).
 - Searches YouTube Music **in parallel**, without logging in, so it doesn't load your account.
 - **Likes** matched tracks (skipping ones already liked) and/or adds them to a **playlist**. Above 5000 tracks it creates further parts automatically: "Name 2", "Name 3"…
-- **"Popraw nierozpoznane"** (Fix unrecognized) window: fix unmatched tracks by hand, one by one.
+- **Fix unrecognized** window: fix unmatched tracks by hand, one by one.
 - Robust against YouTube hiccups:
   - retries failed requests;
   - defers failed likes to the end;
@@ -181,6 +183,7 @@ Dostępne opcje: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--dela
   - when the session expires, **asks for a new login and carries on**.
 - At the end it **verifies on your account** how many tracks are actually liked.
 - Caches search results, so the next run only processes new tracks.
+- English and Polish interface (**PL / EN** switch).
 
 ## Getting started
 
@@ -190,13 +193,15 @@ Download `LocalToYTMusic.exe` from **[Releases](../../releases)** and run it. No
 
 > Windows SmartScreen may warn about an unknown app (the exe isn't signed). Click "More info", then "Run anyway". Or build it yourself, see [Running from source](#running-from-source).
 
+![Main window](docs/screenshots/en/01-main-window.png)
+
 ### 2. Dry run first, no login needed
 
-1. Pick your folder in **Folder z muzyką** (Music folder).
-2. Tick **Tylko test** (Dry run).
+1. Pick your folder in **Music folder**.
+2. Tick **Dry run**.
 3. Click **Start**.
 
-Nothing is changed on your account. Unmatched tracks go to a report (**Otwórz raport braków**, Open missing report).
+Nothing is changed on your account. Unmatched tracks go to a report (**Open missing report**).
 
 ### 3. Connect your account (`browser.json`)
 
@@ -208,25 +213,29 @@ The app authenticates like your browser does: with request headers copied from a
 4. Filter by `browse` and click the `browse?...` request (**POST**, status 200).
 5. Under **Headers**, find **Request Headers**, select the whole section and copy it.
    - No `browse`? Filter by `youtubei` and take any POST request, e.g. `next` after clicking a song.
-6. In the app click **Utwórz z nagłówków...** (Create from headers), paste and click **Zapisz** (Save). The app tests the login and shows the account name.
+6. In the app click **Create from headers...**, paste and click **Save**. The app tests the login and shows the account name.
 7. **Close the incognito window.** Don't log out, just close it.
 
-> **Why incognito?** An open YouTube tab rotates the login cookies every few minutes, which makes the copied file stop working ("SESJA WYGASŁA", session expired). A closed incognito window no longer rotates anything, so the file keeps working.
+![Creating the auth file](docs/screenshots/en/02-authorization.png)
+
+> **Why incognito?** An open YouTube tab rotates the login cookies every few minutes, which makes the copied file stop working ("SESSION EXPIRED"). A closed incognito window no longer rotates anything, so the file keeps working.
 
 > ⚠️ `browser.json` gives **full access to your YouTube account**. Never share or upload it (it is in `.gitignore`).
 
 ### 4. Like and/or add to a playlist
 
-1. Untick **Tylko test**.
-2. Tick **Polub dopasowane utwory** (Like matched tracks) and/or enter a **Playlista** (Playlist) name.
+1. Untick **Dry run**.
+2. Tick **Like matched tracks** and/or enter a **Playlist** name.
 3. Click **Start**.
 
 | Status text | Meaning |
 |---|---|
-| `przetworzono 750/4611` | processed so far |
-| `polubione: 741` | likes accepted by YouTube |
-| `do ponowienia: 9` | failed, retried at the end |
-| `SPRAWDZONE NA KONCIE: polubione X z Y` | final result, verified on your account |
+| `processed 750/4611` | processed so far |
+| `liked: 741` | likes accepted by YouTube |
+| `to retry: 9` | failed, retried at the end |
+| `VERIFIED ON ACCOUNT: liked X of Y` | final result, verified on your account |
+
+![Done](docs/screenshots/en/04-done.png)
 
 If the session expires mid-run, the app pauses and opens the header dialog. After you save, it continues where it left off. Headers from a different account are rejected.
 
@@ -234,28 +243,33 @@ If the session expires mid-run, the app pauses and opens the header dialog. Afte
 
 ### 5. Fix unrecognized tracks
 
-Click **Popraw nierozpoznane...** (Fix unrecognized). For each unmatched track you can:
+Click **Fix unrecognized...**. For each unmatched track you can:
 - edit the search text and press Enter;
-- switch the type to "Filmy" (Videos) or "Wszystko" (All);
-- preview the result in the browser;
+- switch the type to "Videos" or "All";
+- listen to the result in the browser;
 - paste your own YouTube link.
 
-**Użyj zaznaczonego** (Use selected) assigns the track and moves on. Then click **Start**: only the fixed tracks get processed.
+**Use selected** assigns the track and moves on. Then click **Start**: only the fixed tracks get processed.
+
+![Fix unrecognized tracks](docs/screenshots/en/05-fix-unrecognized.png)
 
 ## Settings
 
 | Field | Description |
 |---|---|
-| Folder z muzyką | music folder (FLAC/MP3), subfolders included |
-| Plik autoryzacji | `browser.json`, see step 3 |
-| Folder wyników | output folder: search cache `ytm_cache.json` and missing report `ytm_not_found.csv` |
-| Playlista | playlist name (private); empty means no playlist |
-| Polub dopasowane utwory | like matched tracks |
-| Tylko test | scan and search only, no account changes, no login |
-| Opóźnienie [s] | delay between requests; **3 s** recommended for large collections; raised automatically on errors (up to 5 s) |
-| Wątki | parallel searches (1–8, default 4) |
+| Music folder | folder with FLAC/MP3, subfolders included |
+| Auth file | `browser.json`, see step 3 |
+| Output folder | search cache `ytm_cache.json` and missing report `ytm_not_found.csv` |
+| Playlist | playlist name (private); empty means no playlist |
+| Like matched tracks | marks tracks as "Liked" |
+| Dry run | scan and search only, no account changes, no login |
+| Delay [s] | pause between requests; **3 s** recommended for large collections; raised automatically on errors (up to 5 s) |
+| Threads | parallel searches (1–8, default 4) |
+| PL / EN | interface language |
 
 **How long does it take?** For ~5000 tracks, searching takes tens of minutes and liking takes a few hours, because YouTube only allows liking one track at a time. You can **Stop** and resume later: completed work is skipped.
+
+The full guide is also in the app under **Help**.
 
 ## Tip: YouTube Music ReVanced
 
@@ -287,11 +301,13 @@ build.bat
 Optional command-line mode:
 
 ```bat
-python local_to_ytmusic.py "D:\Music" --dry-run
-python local_to_ytmusic.py "D:\Music" --like --playlist "My collection" --delay 3
+python local_to_ytmusic.py "D:\Music" --dry-run --lang en
+python local_to_ytmusic.py "D:\Music" --like --playlist "My collection" --delay 3 --lang en
 ```
 
-Options: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--version`, `-h`.
+Options: `--auth`, `--out`, `--playlist`, `--like`, `--dry-run`, `--delay`, `--workers`, `--lang pl|en`, `--version`, `-h`.
+
+Translations live in `translations.py` (Polish text → English text).
 
 ## Notes
 
