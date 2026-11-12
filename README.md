@@ -1,3 +1,5 @@
+<img src="assets/icon.png" width="96" align="right" alt="">
+
 # Local → YouTube Music
 
 Przenosi Twoją lokalną kolekcję muzyki (FLAC / MP3) do **YouTube Music**: wyszukuje każdy utwór, **polubia** go na Twoim koncie i/lub dodaje do **playlisty**. Dzięki temu rekomendacje i miksy YouTube Music opierają się na muzyce, której naprawdę słuchasz. Program dla Windows z prostym okienkiem, działa bez instalowania Pythona.
