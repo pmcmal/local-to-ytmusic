@@ -2,6 +2,15 @@
 
 Wszystkie zmiany w programie / All notable changes.
 
+## 1.1.0 – 2026-11-12
+*Ikona programu / App icon*
+
+**PL**
+- Program ma własną ikonę z nutą: w pliku exe, na pasku zadań i w oknach programu.
+
+**EN**
+- The app has its own music-note icon: on the exe file, in the taskbar and in the app windows.
+
 ## 1.0.0 – 2026-11-05
 *Pierwsze publiczne wydanie / First public release*
 
