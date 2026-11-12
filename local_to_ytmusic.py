@@ -45,7 +45,7 @@ from ytmusicapi.auth.browser import setup_browser
 from translations import EN, HELP_EN
 
 APP_NAME = "Local → YouTube Music"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 AUDIO_EXT: frozenset[str] = frozenset({".flac", ".mp3"})
 CACHE_NAME = "ytm_cache.json"
 REPORT_NAME = "ytm_not_found.csv"

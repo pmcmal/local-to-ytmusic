@@ -2,6 +2,23 @@
 
 Wszystkie zmiany w programie / All notable changes.
 
+## 1.2.0 – 2026-11-12
+*Wersja angielska / English version*
+
+**PL**
+- Przełącznik języka **PL / EN** w prawym górnym rogu okna. Po zmianie okno przebudowuje się w nowym języku, a ustawienia zostają.
+- Przetłumaczone jest wszystko: okna, przyciski, komunikaty, log i cała Pomoc.
+- Przy pierwszym uruchomieniu program wybiera język Windows.
+- Wiersz poleceń: nowa opcja `--lang pl|en`.
+- README: angielska część z angielskimi nazwami przycisków i zrzutami ekranu.
+
+**EN**
+- **PL / EN** language switch in the top-right corner of the window. After switching, the window is rebuilt in the new language and the settings are kept.
+- Everything is translated: windows, buttons, messages, the log and the whole Help.
+- On first run the app follows your Windows language.
+- Command line: new `--lang pl|en` option.
+- README: English section with English button names and screenshots.
+
 ## 1.1.0 – 2026-11-12
 *Ikona programu / App icon*
 
