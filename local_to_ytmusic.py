@@ -42,6 +42,8 @@ from mutagen.easyid3 import EasyID3
 from ytmusicapi import LikeStatus, YTMusic
 from ytmusicapi.auth.browser import setup_browser
 
+from translations import EN, HELP_EN
+
 APP_NAME = "Local → YouTube Music"
 __version__ = "1.1.0"
 AUDIO_EXT: frozenset[str] = frozenset({".flac", ".mp3"})
@@ -62,6 +64,36 @@ MAX_AUTO_DELAY = 5.0   # do tylu sekund program sam zwalnia przy błędach
 SESSION_DELAY = 3.0    # minimalne opóźnienie po wygaśnięciu sesji
 
 log = logging.getLogger("ytm")
+
+LANGS = {"pl": "PL", "en": "EN"}
+LANG = "pl"  # język interfejsu i logu: "pl" albo "en"
+
+
+def tr(text: str) -> str:
+    """Tekst w aktualnym języku. Kluczem jest polski oryginał (translations.EN)."""
+    return EN.get(text, text) if LANG == "en" else text
+
+
+def system_lang() -> str:
+    """Język startowy: polski, gdy Windows jest po polsku, w innym razie angielski."""
+    try:
+        import ctypes
+        return "pl" if ctypes.windll.kernel32.GetUserDefaultUILanguage() & 0x3FF == 0x15 else "en"
+    except Exception:
+        import locale
+        return "pl" if (locale.getlocale()[0] or "").lower().startswith(("pl", "polish")) else "en"
+
+
+class _TranslateLog(logging.Filter):
+    """Tłumaczy szablon komunikatu logu (np. 'Skanuję %s ...') przed formatowaniem."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = tr(record.msg)
+        return True
+
+
+log.addFilter(_TranslateLog())
 
 
 def app_dir() -> Path:
@@ -231,9 +263,9 @@ def part_name(base: str, n: int) -> str:
 
 
 def create_playlist(yt: YTMusic, name: str) -> str:
-    result = yt.create_playlist(name, "Import z lokalnej kolekcji", "PRIVATE")
+    result = yt.create_playlist(name, tr("Import z lokalnej kolekcji"), "PRIVATE")
     if not isinstance(result, str):
-        raise RuntimeError(f"Nie udało się utworzyć playlisty: {result}")
+        raise RuntimeError(tr("Nie udało się utworzyć playlisty: {}").format(result))
     log.info("Utworzono playlistę '%s'", name)
     return result
 
@@ -414,7 +446,7 @@ def load_auth(path: Path) -> str:
 
 def account_label(yt: YTMusic) -> str:
     info = yt.get_account_info()
-    return f"{info.get('accountName', '?')} ({info.get('channelHandle') or 'bez nazwy kanału'})"
+    return f"{info.get('accountName', '?')} ({info.get('channelHandle') or tr('bez nazwy kanału')})"
 
 
 def auth_problem(path: Path) -> str | None:
@@ -422,15 +454,15 @@ def auth_problem(path: Path) -> str | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return f"Nie można odczytać pliku autoryzacji: {exc}"
+        return tr("Nie można odczytać pliku autoryzacji: {}").format(exc)
     if not isinstance(data, dict):
-        return "Nieprawidłowy format pliku autoryzacji."
+        return tr("Nieprawidłowy format pliku autoryzacji.")
     headers = clean_headers(data)
     if "SAPISIDHASH" not in headers.get("authorization", ""):
-        return AUTH_HINT
+        return tr(AUTH_HINT)
     if "__Secure-3PAPISID" not in headers.get("cookie", ""):
-        return ("W cookie brakuje '__Secure-3PAPISID' - zaloguj się na "
-                "music.youtube.com i skopiuj nagłówki ponownie.")
+        return tr("W cookie brakuje '__Secure-3PAPISID' - zaloguj się na "
+                  "music.youtube.com i skopiuj nagłówki ponownie.")
     return None
 
 
@@ -500,7 +532,7 @@ def search_one(track: Track, delay: float, stop: threading.Event,
             limited = "HTTP 429" in str(exc)
             pause = (60 if limited else 10) * attempt
             log.warning("%s '%s' - pauza %d s, ponawiam (%d/%d)",
-                        "YouTube ogranicza zapytania" if limited else f"Błąd ({exc})",
+                        tr("YouTube ogranicza zapytania") if limited else tr("Błąd ({})").format(exc),
                         track.query, pause, attempt, SEARCH_RETRIES - 1)
             throttle.penalize(pause)
             continue
@@ -580,7 +612,7 @@ def run_import(
     total = len(tracks)
     done = total - len(todo)
     log.info("Już w cache: %d | do wyszukania: %d (wątki: %d)", done, len(todo), cfg.workers)
-    progress("Wyszukiwanie", done, total)
+    progress(tr("Wyszukiwanie"), done, total)
 
     throttle = Throttle()
     failed = 0
@@ -601,7 +633,7 @@ def run_import(
             else:
                 cache[track.key] = vid
             log.info("[%d/%d] %s %s", done + n, total, "OK " if vid else "---", track.query)
-            progress("Wyszukiwanie", done + n, total)
+            progress(tr("Wyszukiwanie"), done + n, total)
             if n % 50 == 0:
                 save_cache(cfg.cache_file, cache)
             check_stop()
@@ -676,12 +708,13 @@ def run_import(
                 new_yt = RetryingYTMusic(load_auth(Path(path)))
                 who = account_label(new_yt)
             except Exception as exc:
-                reason = f"Nowe nagłówki też nie działają ({str(exc)[:100]}). Skopiuj je ponownie."
+                reason = tr("Nowe nagłówki też nie działają ({}). Skopiuj je ponownie."
+                            ).format(str(exc)[:100])
                 log.error("%s", reason)
                 continue
             if account and who != account:
-                reason = (f"To inne konto: {who}. Potrzebne: {account}. Przełącz konto "
-                          "na music.youtube.com i skopiuj nagłówki ponownie.")
+                reason = tr("To inne konto: {}. Potrzebne: {}. Przełącz konto na music.youtube.com "
+                            "i skopiuj nagłówki ponownie.").format(who, account)
                 log.error("%s", reason)
                 continue
             yt, account = new_yt, who
@@ -697,8 +730,8 @@ def run_import(
             except SessionExpired:
                 slow_down(SESSION_DELAY)
                 log.error("SESJA WYGASŁA (HTTP 401) - YouTube wylogował plik autoryzacji.")
-                if not renew("Sesja YouTube wygasła - YouTube wylogował plik autoryzacji. "
-                             "Wklej nowe nagłówki, a program będzie kontynuował."):
+                if not renew(tr("Sesja YouTube wygasła - YouTube wylogował plik autoryzacji. "
+                                "Wklej nowe nagłówki, a program będzie kontynuował.")):
                     raise
 
     # Test logowania przed zmianami - zamiast tysięcy błędów jeden czytelny.
@@ -710,15 +743,15 @@ def run_import(
                   "(%s). Kliknij 'Utwórz z nagłówków...' i wklej świeże nagłówki "
                   "z music.youtube.com - instrukcja pod przyciskiem '?'.",
                   str(exc)[:120])
-        if not renew("Logowanie do konta nie działa - sesja wygasła albo plik jest zły. "
-                     "Wklej nowe nagłówki."):
+        if not renew(tr("Logowanie do konta nie działa - sesja wygasła albo plik jest zły. "
+                        "Wklej nowe nagłówki.")):
             return 1
 
     try:
         if cfg.playlist:
             # YouTube: max PLAYLIST_LIMIT utworów na playlistę -> kolejne części
             # "Nazwa 2", "Nazwa 3"... Utwory z istniejących części są pomijane.
-            parts, existing = acc(lambda y: load_playlist_parts(y, cfg.playlist), "Playlisty")
+            parts, existing = acc(lambda y: load_playlist_parts(y, cfg.playlist), tr("Playlisty"))
             new_ids = [v for v in unique if v not in existing]
             log.info("Do dodania na playlistę: %d (już było: %d)",
                      len(new_ids), len(unique) - len(new_ids))
@@ -728,18 +761,18 @@ def run_import(
                 if part_i >= len(parts):
                     name = part_name(cfg.playlist, part_i + 1)
                     parts.append([name, acc(lambda y: create_playlist(y, name),
-                                            f"Tworzenie '{name}'"), 0])
+                                            tr("Tworzenie '{}'").format(name)), 0])
                 name, pid, count = parts[part_i]
                 space = PLAYLIST_LIMIT - count
                 if space <= 0:
                     part_i += 1
                     continue
-                progress("Playlista", pos, len(new_ids))
+                progress(tr("Playlista"), pos, len(new_ids))
                 batch = new_ids[pos:pos + min(BATCH_SIZE, space)]
                 pos += len(batch)
                 try:
                     resp = acc(lambda y: y.add_playlist_items(pid, batch, duplicates=False),
-                               f"Playlista '{name}'")
+                               tr("Playlista '{}'").format(name))
                     if isinstance(resp, dict) and resp.get("status") not in (None, "STATUS_SUCCEEDED"):
                         failure("'%s': partia odrzucona (%s)", name, resp.get("status"))
                     else:
@@ -751,16 +784,16 @@ def run_import(
                 except Exception as exc:
                     failure("'%s': błąd dodawania partii: %s", name, exc)
                 time.sleep(delay)
-            progress("Playlista", len(new_ids), len(new_ids))
+            progress(tr("Playlista"), len(new_ids), len(new_ids))
 
         if cfg.like:
-            msg = "Pobieram listę polubionych z konta (to trwa 1-2 min, program pracuje)..."
+            msg = tr("Pobieram listę polubionych z konta (to trwa 1-2 min, program pracuje)...")
             log.info(msg)
             progress(msg, 0, 0)
             try:
                 liked = {t.get("videoId") for t in acc(
                     lambda y: y.get_liked_songs(limit=None),
-                    "Pobieranie polubionych").get("tracks") or []}
+                    tr("Pobieranie polubionych")).get("tracks") or []}
             except (Stopped, SessionExpired):
                 raise
             except Exception as exc:
@@ -773,9 +806,9 @@ def run_import(
             later: list[str] = []  # nieudane - ponowione na końcu, po przerwie
             for n, vid in enumerate(to_like, 1):
                 check_stop()
-                progress("Polubienia", n - 1, len(to_like),
-                         f"polubione: {ok}  |  do ponowienia: {len(later)}  |  "
-                         f"opóźnienie: {delay:g} s")
+                progress(tr("Polubienia"), n - 1, len(to_like),
+                         tr("polubione: {}  |  do ponowienia: {}  |  opóźnienie: {:g} s"
+                            ).format(ok, len(later), delay))
                 try:
                     acc(lambda y: y.rate_song(vid, LikeStatus.LIKE), f"Like {vid}")
                     ok += 1
@@ -789,8 +822,8 @@ def run_import(
                     log.info("Przetworzono %d z %d  |  polubione: %d  |  do ponowienia: %d",
                              n, len(to_like), ok, len(later))
                 time.sleep(delay)
-            progress("Polubienia", len(to_like), len(to_like),
-                     f"polubione: {ok}  |  do ponowienia: {len(later)}")
+            progress(tr("Polubienia"), len(to_like), len(to_like),
+                     tr("polubione: {}  |  do ponowienia: {}").format(ok, len(later)))
 
             for rnd in range(1, LATER_ROUNDS + 1):
                 if not later:
@@ -803,8 +836,8 @@ def run_import(
                 still: list[str] = []
                 for n, vid in enumerate(later, 1):
                     check_stop()
-                    progress(f"Ponawianie (runda {rnd}/{LATER_ROUNDS})", n - 1, len(later),
-                             f"polubione łącznie: {ok}")
+                    progress(tr("Ponawianie (runda {}/{})").format(rnd, LATER_ROUNDS),
+                             n - 1, len(later), tr("polubione łącznie: {}").format(ok))
                     try:
                         acc(lambda y: y.rate_song(vid, LikeStatus.LIKE), f"Like {vid}")
                         ok += 1
@@ -822,23 +855,23 @@ def run_import(
                      "nieudane: %d", len(to_like), ok, len(later))
 
             # Sprawdzenie na koncie: czy utwory faktycznie są na liście polubionych.
-            msg = "Sprawdzam polubione na koncie (to trwa 1-2 min, program pracuje)..."
+            msg = tr("Sprawdzam polubione na koncie (to trwa 1-2 min, program pracuje)...")
             log.info(msg)
             progress(msg, 0, 0)
             try:
                 now = {t.get("videoId") for t in acc(
                     lambda y: y.get_liked_songs(limit=None),
-                    "Sprawdzanie polubionych").get("tracks") or []}
+                    tr("Sprawdzanie polubionych")).get("tracks") or []}
                 missing = [v for v in unique if v not in now]
                 log.info("SPRAWDZONE NA KONCIE: polubione %d z %d utworów z kolekcji%s",
                          len(unique) - len(missing), len(unique),
-                         f"  |  brakuje: {len(missing)} - kliknij Start ponownie później"
-                         if missing else "  - komplet.")
+                         tr("  |  brakuje: {} - kliknij Start ponownie później").format(len(missing))
+                         if missing else tr("  - komplet."))
             except (Stopped, SessionExpired):
                 raise
             except Exception as exc:
                 log.warning("Nie udało się sprawdzić polubionych na koncie: %s", exc)
-            progress("Sprawdzanie na koncie - zakończone", 1, 1)
+            progress(tr("Sprawdzanie na koncie - zakończone"), 1, 1)
     except (Stopped, KeyboardInterrupt):
         log.warning("Przerwano.")
         return 130
@@ -863,6 +896,15 @@ def run_import(
 
 
 def run_gui() -> int:
+    # Zmiana języka zamyka okno i buduje je od nowa (ustawienia są zapisane).
+    while _gui_once():
+        pass
+    return 0
+
+
+def _gui_once() -> bool:
+    """Jedno okno programu. Zwraca True, gdy trzeba je otworzyć ponownie (zmiana języka)."""
+    global LANG
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -876,6 +918,8 @@ def run_gui() -> int:
             return {}
 
     st = load_settings()
+    LANG = st.get("lang") if st.get("lang") in LANGS else system_lang()
+    restart = [False]
 
     root = tk.Tk()
     root.title(f"{APP_NAME} {__version__}")
@@ -893,7 +937,8 @@ def run_gui() -> int:
     v_dry = tk.BooleanVar(value=st.get("dry_run", True))
     v_delay = tk.StringVar(value=str(st.get("delay", DEFAULT_DELAY_S)))
     v_workers = tk.StringVar(value=str(st.get("workers", DEFAULT_WORKERS)))
-    v_status = tk.StringVar(value="Gotowy.")
+    v_status = tk.StringVar(value=tr("Gotowy."))
+    v_lang = tk.StringVar(value=LANGS[LANG])
 
     frm = ttk.Frame(root, padding=10)
     frm.pack(fill="both", expand=True)
@@ -908,7 +953,7 @@ def run_gui() -> int:
         cur = Path(v_auth.get()) if v_auth.get() else base / AUTH_NAME
         f = filedialog.askopenfilename(
             initialdir=str(cur.parent if cur.parent.exists() else base),
-            filetypes=[("JSON", "*.json"), ("Wszystkie", "*.*")],
+            filetypes=[("JSON", "*.json"), (tr("Wszystkie"), "*.*")],
         )
         if f:
             v_auth.set(os.path.normpath(f))
@@ -921,38 +966,38 @@ def run_gui() -> int:
             help_win[0].focus_force()
             return
         win = tk.Toplevel(root)
-        win.title(f"Pomoc - {APP_NAME}")
+        win.title(tr("Pomoc - {}").format(APP_NAME))
         help_win[:] = [win]
         txt = scrolledtext.ScrolledText(win, width=78, height=34, wrap="word",
                                         font=("Consolas", 10))
-        txt.insert("1.0", HELP_TEXT)
+        txt.insert("1.0", HELP_EN if LANG == "en" else HELP_TEXT)
         txt.config(state="disabled")
         txt.pack(fill="both", expand=True, padx=10, pady=(10, 4))
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(4, 10))
-        ttk.Button(bar, text="Otwórz music.youtube.com",
+        ttk.Button(bar, text=tr("Otwórz music.youtube.com"),
                    command=lambda: webbrowser.open("https://music.youtube.com")
                    ).pack(side="left")
-        ttk.Button(bar, text="Zamknij", command=win.destroy).pack(side="right")
+        ttk.Button(bar, text=tr("Zamknij"), command=win.destroy).pack(side="right")
 
     def open_fixer() -> None:
         """Ręczne poprawianie nierozpoznanych utworów, po kolei."""
         out = Path(v_out.get().strip() or base)
         report, cache_path = out / REPORT_NAME, out / CACHE_NAME
         if not report.is_file() or not cache_path.is_file():
-            messagebox.showinfo(APP_NAME, "Najpierw uruchom wyszukiwanie (Start) - "
-                                "lista nierozpoznanych powstanie po nim.")
+            messagebox.showinfo(APP_NAME, tr("Najpierw uruchom wyszukiwanie (Start) - "
+                                             "lista nierozpoznanych powstanie po nim."))
             return
         with report.open(encoding="utf-8-sig", newline="") as fh:
             rows = list(csv.reader(fh, delimiter=";"))[1:]
         items = [Track(r[0], r[1]) for r in rows if len(r) >= 2 and r[1].strip()]
         if not items:
-            messagebox.showinfo(APP_NAME, "Brak nierozpoznanych utworów.")
+            messagebox.showinfo(APP_NAME, tr("Brak nierozpoznanych utworów."))
             return
         cache = load_cache(cache_path)
 
         win = tk.Toplevel(root)
-        win.title("Popraw nierozpoznane")
+        win.title(tr("Popraw nierozpoznane"))
         win.geometry("1000x560")
         win.minsize(800, 450)
         win.transient(root)
@@ -960,10 +1005,10 @@ def run_gui() -> int:
 
         v_info = tk.StringVar()
         v_query = tk.StringVar()
-        v_filter = tk.StringVar(value="Utwory")
+        v_filter = tk.StringVar(value=tr("Utwory"))
         v_link = tk.StringVar()
         v_st = tk.StringVar()
-        filters = {"Utwory": "songs", "Filmy": "videos", "Wszystko": None}
+        filters = {tr("Utwory"): "songs", tr("Filmy"): "videos", tr("Wszystko"): None}
 
         ttk.Label(win, textvariable=v_info, padding=(10, 8, 10, 0)).pack(anchor="w")
         pane = ttk.PanedWindow(win, orient="horizontal")
@@ -988,19 +1033,19 @@ def run_gui() -> int:
         qrow = ttk.Frame(right)
         qrow.grid(row=1, column=0, columnspan=4, sticky="ew")
         qrow.columnconfigure(1, weight=1)
-        ttk.Label(qrow, text="Szukaj:").grid(row=0, column=0, padx=(0, 4))
+        ttk.Label(qrow, text=tr("Szukaj:")).grid(row=0, column=0, padx=(0, 4))
         e_query = ttk.Entry(qrow, textvariable=v_query)
         e_query.grid(row=0, column=1, sticky="ew")
         ttk.Combobox(qrow, textvariable=v_filter, values=list(filters), width=9,
                      state="readonly").grid(row=0, column=2, padx=4)
-        b_search = ttk.Button(qrow, text="Szukaj")
+        b_search = ttk.Button(qrow, text=tr("Szukaj"))
         b_search.grid(row=0, column=3)
 
         cols = ("artist", "title", "album", "time", "type")
         tv = ttk.Treeview(right, columns=cols, show="headings", selectmode="browse")
         for c, label, w in zip(cols, ("Artysta", "Tytuł", "Album", "Czas", "Typ"),
                                (170, 230, 160, 55, 60)):
-            tv.heading(c, text=label)
+            tv.heading(c, text=tr(label))
             tv.column(c, width=w, stretch=c in ("artist", "title", "album"))
         tv.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=6)
         tsb = ttk.Scrollbar(right, orient="vertical", command=tv.yview)
@@ -1009,11 +1054,11 @@ def run_gui() -> int:
 
         acts = ttk.Frame(right)
         acts.grid(row=3, column=0, columnspan=4, sticky="ew")
-        b_use = ttk.Button(acts, text="✓ Użyj zaznaczonego")
-        b_play = ttk.Button(acts, text="▶ Odsłuchaj w przeglądarce")
-        b_prev = ttk.Button(acts, text="← Poprzedni")
-        b_next = ttk.Button(acts, text="Pomiń →")
-        b_clear = ttk.Button(acts, text="Usuń przypisanie")
+        b_use = ttk.Button(acts, text=tr("✓ Użyj zaznaczonego"))
+        b_play = ttk.Button(acts, text=tr("▶ Odsłuchaj w przeglądarce"))
+        b_prev = ttk.Button(acts, text=tr("← Poprzedni"))
+        b_next = ttk.Button(acts, text=tr("Pomiń →"))
+        b_clear = ttk.Button(acts, text=tr("Usuń przypisanie"))
         b_use.pack(side="left")
         b_play.pack(side="left", padx=6)
         b_next.pack(side="right")
@@ -1023,9 +1068,9 @@ def run_gui() -> int:
         lrow = ttk.Frame(right)
         lrow.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         lrow.columnconfigure(1, weight=1)
-        ttk.Label(lrow, text="Lub wklej link YouTube:").grid(row=0, column=0, padx=(0, 4))
+        ttk.Label(lrow, text=tr("Lub wklej link YouTube:")).grid(row=0, column=0, padx=(0, 4))
         ttk.Entry(lrow, textvariable=v_link).grid(row=0, column=1, sticky="ew")
-        b_link = ttk.Button(lrow, text="Użyj linku")
+        b_link = ttk.Button(lrow, text=tr("Użyj linku"))
         b_link.grid(row=0, column=2, padx=(4, 0))
 
         ttk.Label(right, textvariable=v_st, foreground="#555").grid(
@@ -1033,10 +1078,10 @@ def run_gui() -> int:
 
         bottom = ttk.Frame(win, padding=(10, 0, 10, 10))
         bottom.pack(fill="x")
-        ttk.Label(bottom, text="Poprawki zapisują się od razu. Kliknij potem Start w "
-                  "głównym oknie, żeby je polubić / dodać do playlisty.",
+        ttk.Label(bottom, text=tr("Poprawki zapisują się od razu. Kliknij potem Start w "
+                                  "głównym oknie, żeby je polubić / dodać do playlisty."),
                   foreground="#555").pack(side="left")
-        b_close = ttk.Button(bottom, text="Zamknij")
+        b_close = ttk.Button(bottom, text=tr("Zamknij"))
         b_close.pack(side="right")
 
         state = {"i": 0, "token": 0, "results": [], "client": None}
@@ -1048,8 +1093,8 @@ def run_gui() -> int:
 
         def refresh_info() -> None:
             fixed = sum(1 for t in items if cache.get(t.key))
-            v_info.set(f"Nierozpoznane: {len(items)}  |  poprawione: {fixed}  |  "
-                       f"zostało: {len(items) - fixed}")
+            v_info.set(tr("Nierozpoznane: {}  |  poprawione: {}  |  zostało: {}"
+                          ).format(len(items), fixed, len(items) - fixed))
 
         for t in items:
             lb.insert("end", label_for(t))
@@ -1077,7 +1122,8 @@ def run_gui() -> int:
             v_query.set(t.query)
             v_link.set("")
             vid = cache.get(t.key)
-            v_st.set(f"Przypisano: https://music.youtube.com/watch?v={vid}" if vid else "")
+            v_st.set(tr("Przypisano: {}").format(f"https://music.youtube.com/watch?v={vid}")
+                     if vid else "")
             search()
 
         def search() -> None:
@@ -1088,7 +1134,7 @@ def run_gui() -> int:
             token = state["token"]
             flt = filters[v_filter.get()]
             tv.delete(*tv.get_children())
-            v_st.set("Szukam...")
+            v_st.set(tr("Szukam..."))
 
             def work() -> None:
                 try:
@@ -1114,15 +1160,16 @@ def run_gui() -> int:
                         album = (r.get("album") or {}).get("name", "") if isinstance(r.get("album"), dict) else ""
                         tv.insert("", "end", iid=str(n), values=(
                             artists, r.get("title", ""), album, r.get("duration", ""),
-                            {"song": "utwór", "video": "film"}.get(r.get("resultType"), r.get("resultType", ""))))
+                            {"song": tr("utwór"), "video": tr("film")}.get(
+                                r.get("resultType"), r.get("resultType", ""))))
                     if err:
-                        v_st.set(f"Błąd wyszukiwania: {err} - spróbuj ponownie.")
+                        v_st.set(tr("Błąd wyszukiwania: {} - spróbuj ponownie.").format(err))
                     elif not res:
-                        v_st.set("Brak wyników - zmień zapytanie albo typ (Filmy / Wszystko).")
+                        v_st.set(tr("Brak wyników - zmień zapytanie albo typ (Filmy / Wszystko)."))
                     else:
                         cur = cache.get(items[state["i"]].key)
-                        v_st.set(f"Wyników: {len(res)}. Dwuklik lub '✓ Użyj' = przypisz."
-                                 + (f"  (obecnie przypisano: {cur})" if cur else ""))
+                        v_st.set(tr("Wyników: {}. Dwuklik lub '✓ Użyj' = przypisz.").format(len(res))
+                                 + (tr("  (obecnie przypisano: {})").format(cur) if cur else ""))
                         tv.selection_set("0")
                         tv.focus("0")
             except queue.Empty:
@@ -1136,7 +1183,8 @@ def run_gui() -> int:
             try:
                 save_cache(cache_path, cache)
             except OSError as exc:
-                messagebox.showerror(APP_NAME, f"Nie można zapisać cache:\n{exc}", parent=win)
+                messagebox.showerror(APP_NAME, tr("Nie można zapisać cache:\n{}").format(exc),
+                                     parent=win)
                 return
             update_row(state["i"])
             refresh_info()
@@ -1144,7 +1192,7 @@ def run_gui() -> int:
                 log.info("Ręcznie przypisano: %s -> %s", t.query, vid)
                 select(state["i"] + 1)
             else:
-                v_st.set("Usunięto przypisanie.")
+                v_st.set(tr("Usunięto przypisanie."))
 
         def selected_vid() -> str | None:
             sel = tv.selection()
@@ -1157,7 +1205,7 @@ def run_gui() -> int:
             if vid:
                 assign(vid)
             else:
-                v_st.set("Zaznacz wynik na liście.")
+                v_st.set(tr("Zaznacz wynik na liście."))
 
         def play() -> None:
             vid = selected_vid() or cache.get(items[state["i"]].key)
@@ -1169,8 +1217,9 @@ def run_gui() -> int:
             m_ = re.search(r"(?:v=|youtu\.be/|/watch/|/shorts/)([\w-]{11})", text) or \
                 re.fullmatch(r"([\w-]{11})", text)
             if not m_:
-                messagebox.showerror(APP_NAME, "Nie rozpoznano linku.\nPrzykład: "
-                                     "https://music.youtube.com/watch?v=dQw4w9WgXcQ", parent=win)
+                messagebox.showerror(APP_NAME, tr("Nie rozpoznano linku.\nPrzykład: "
+                                                  "https://music.youtube.com/watch?v=dQw4w9WgXcQ"),
+                                     parent=win)
                 return
             assign(m_.group(1))
 
@@ -1214,7 +1263,7 @@ def run_gui() -> int:
         """Okno wklejania nagłówków. on_done(ścieżka|None) - gdy wołane z pracującego
         programu (wygasła sesja): po zapisaniu praca idzie dalej, po Anuluj - przerywa."""
         win = tk.Toplevel(root)
-        win.title("Autoryzacja YouTube Music")
+        win.title(tr("Autoryzacja YouTube Music"))
         win.transient(root)
         win.grab_set()
         finished = [False]
@@ -1232,16 +1281,16 @@ def run_gui() -> int:
                 fill="x", padx=10, pady=(10, 0))
             ttk.Label(
                 win, justify="left", wraplength=560,
-                text=("Rada: żeby sesja nie wygasała, skopiuj nagłówki z OKNA INCOGNITO "
-                      "(Ctrl+Shift+N), a po zapisaniu zamknij to okno (nie wylogowuj się). "
-                      "Otwarta karta YouTube co kilka minut wymienia logowanie i stary "
-                      "plik przestaje działać."),
+                text=tr("Rada: żeby sesja nie wygasała, skopiuj nagłówki z OKNA INCOGNITO "
+                        "(Ctrl+Shift+N), a po zapisaniu zamknij to okno (nie wylogowuj się). "
+                        "Otwarta karta YouTube co kilka minut wymienia logowanie i stary "
+                        "plik przestaje działać."),
             ).pack(fill="x", padx=10, pady=(4, 0))
         top = ttk.Frame(win)
         top.pack(fill="x", padx=10, pady=(10, 4))
         ttk.Label(
             top, justify="left", wraplength=500,
-            text=(
+            text=tr(
                 "Wklej poniżej nagłówki żądania POST /browse z music.youtube.com "
                 "(F12 → Network → filtr 'browse' → Headers → Request Headers).\n"
                 "Przy otwartym F12 wejdź w YT Music w 'Polubione utwory' - wtedy "
@@ -1258,7 +1307,7 @@ def run_gui() -> int:
         def save() -> None:
             raw = txt.get("1.0", "end").strip()
             if not raw:
-                messagebox.showwarning(APP_NAME, "Wklej nagłówki.", parent=win)
+                messagebox.showwarning(APP_NAME, tr("Wklej nagłówki."), parent=win)
                 return
             target = Path(v_auth.get() or base / AUTH_NAME)
             if target.suffix.lower() != ".json":
@@ -1266,73 +1315,76 @@ def run_gui() -> int:
             try:
                 headers = clean_headers(json.loads(setup_browser(headers_raw=raw)))
             except Exception as exc:
-                messagebox.showerror(APP_NAME, f"Nie udało się:\n{exc}", parent=win)
+                messagebox.showerror(APP_NAME, tr("Nie udało się:\n{}").format(exc), parent=win)
                 return
             if "SAPISIDHASH" not in str(headers.get("authorization", "")):
-                messagebox.showerror(APP_NAME, AUTH_HINT, parent=win)
+                messagebox.showerror(APP_NAME, tr(AUTH_HINT), parent=win)
                 return
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(json.dumps(headers, ensure_ascii=True, indent=4,
                                              sort_keys=True), encoding="utf-8")
             except OSError as exc:
-                messagebox.showerror(APP_NAME, f"Nie można zapisać:\n{exc}", parent=win)
+                messagebox.showerror(APP_NAME, tr("Nie można zapisać:\n{}").format(exc), parent=win)
                 return
             v_auth.set(str(target))
             try:
                 who = account_label(RetryingYTMusic(json.dumps(headers)))
             except Exception as exc:
                 messagebox.showwarning(
-                    APP_NAME, f"Zapisano:\n{target}\n\nAle test logowania się nie "
-                    f"udał ({exc}).\nSkopiuj nagłówki ponownie.", parent=win)
+                    APP_NAME, tr("Zapisano:\n{}\n\nAle test logowania się nie udał ({}).\n"
+                                 "Skopiuj nagłówki ponownie.").format(target, exc), parent=win)
                 return
-            messagebox.showinfo(APP_NAME, f"Zapisano:\n{target}\n\nZalogowano jako:\n"
-                                f"{who}\n\nJeśli to nie to konto - przełącz konto na "
-                                "music.youtube.com i skopiuj nagłówki ponownie."
-                                + ("\n\nProgram kontynuuje pracę." if on_done else ""),
+            messagebox.showinfo(APP_NAME, tr("Zapisano:\n{}\n\nZalogowano jako:\n{}\n\nJeśli to "
+                                             "nie to konto - przełącz konto na music.youtube.com "
+                                             "i skopiuj nagłówki ponownie.").format(target, who)
+                                + (tr("\n\nProgram kontynuuje pracę.") if on_done else ""),
                                 parent=win)
             finish(target)
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(4, 10))
-        ttk.Button(bar, text="Zapisz", command=save).pack(side="right")
-        ttk.Button(bar, text="Anuluj" + (" (przerwij pracę)" if on_done else ""),
+        ttk.Button(bar, text=tr("Zapisz"), command=save).pack(side="right")
+        ttk.Button(bar, text=tr("Anuluj") + (tr(" (przerwij pracę)") if on_done else ""),
                    command=lambda: finish(None)).pack(side="right", padx=6)
         win.protocol("WM_DELETE_WINDOW", lambda: finish(None))
         txt.focus_set()
 
     r = 0
-    ttk.Label(frm, text="Folder z muzyką:").grid(row=r, column=0, sticky="w", pady=3)
+    ttk.Label(frm, text=tr("Folder z muzyką:")).grid(row=r, column=0, sticky="w", pady=3)
     ttk.Entry(frm, textvariable=v_folder).grid(row=r, column=1, sticky="ew", padx=6)
-    ttk.Button(frm, text="Wybierz...", command=lambda: browse_dir(v_folder)).grid(row=r, column=2, sticky="ew")
+    ttk.Button(frm, text=tr("Wybierz..."), command=lambda: browse_dir(v_folder)).grid(row=r, column=2, sticky="ew")
+    cb_lang = ttk.Combobox(frm, textvariable=v_lang, values=list(LANGS.values()), width=4,
+                           state="readonly")
+    cb_lang.grid(row=r, column=3, padx=(4, 0))
 
     r += 1
-    ttk.Label(frm, text="Plik autoryzacji:").grid(row=r, column=0, sticky="w", pady=3)
+    ttk.Label(frm, text=tr("Plik autoryzacji:")).grid(row=r, column=0, sticky="w", pady=3)
     ttk.Entry(frm, textvariable=v_auth).grid(row=r, column=1, sticky="ew", padx=6)
-    ttk.Button(frm, text="Wybierz...", command=browse_auth).grid(row=r, column=2, sticky="ew")
+    ttk.Button(frm, text=tr("Wybierz..."), command=browse_auth).grid(row=r, column=2, sticky="ew")
     ttk.Button(frm, text="?", width=3, command=show_help).grid(row=r, column=3, padx=(4, 0))
     r += 1
-    ttk.Button(frm, text="Utwórz z nagłówków...", command=create_auth).grid(row=r, column=2, sticky="ew")
+    ttk.Button(frm, text=tr("Utwórz z nagłówków..."), command=create_auth).grid(row=r, column=2, sticky="ew")
 
     r += 1
-    ttk.Label(frm, text="Folder wyników:").grid(row=r, column=0, sticky="w", pady=3)
+    ttk.Label(frm, text=tr("Folder wyników:")).grid(row=r, column=0, sticky="w", pady=3)
     ttk.Entry(frm, textvariable=v_out).grid(row=r, column=1, sticky="ew", padx=6)
-    ttk.Button(frm, text="Wybierz...", command=lambda: browse_dir(v_out)).grid(row=r, column=2, sticky="ew")
+    ttk.Button(frm, text=tr("Wybierz..."), command=lambda: browse_dir(v_out)).grid(row=r, column=2, sticky="ew")
 
     r += 1
-    ttk.Label(frm, text="Playlista (opcjonalnie):").grid(row=r, column=0, sticky="w", pady=3)
+    ttk.Label(frm, text=tr("Playlista (opcjonalnie):")).grid(row=r, column=0, sticky="w", pady=3)
     ttk.Entry(frm, textvariable=v_playlist).grid(row=r, column=1, sticky="ew", padx=6)
 
     r += 1
     opts = ttk.Frame(frm)
     opts.grid(row=r, column=0, columnspan=3, sticky="w", pady=6)
-    ttk.Checkbutton(opts, text="Polub dopasowane utwory", variable=v_like).pack(side="left")
-    ttk.Checkbutton(opts, text="Tylko test (nic nie zmieniaj na koncie)",
+    ttk.Checkbutton(opts, text=tr("Polub dopasowane utwory"), variable=v_like).pack(side="left")
+    ttk.Checkbutton(opts, text=tr("Tylko test (nic nie zmieniaj na koncie)"),
                     variable=v_dry).pack(side="left", padx=16)
-    ttk.Label(opts, text="Opóźnienie [s]:").pack(side="left", padx=(16, 4))
+    ttk.Label(opts, text=tr("Opóźnienie [s]:")).pack(side="left", padx=(16, 4))
     ttk.Spinbox(opts, from_=0.0, to=10.0, increment=0.5, width=5,
                 textvariable=v_delay).pack(side="left")
-    ttk.Label(opts, text="Wątki:").pack(side="left", padx=(16, 4))
+    ttk.Label(opts, text=tr("Wątki:")).pack(side="left", padx=(16, 4))
     ttk.Spinbox(opts, from_=1, to=MAX_WORKERS, increment=1, width=4,
                 textvariable=v_workers).pack(side="left")
 
@@ -1341,10 +1393,10 @@ def run_gui() -> int:
     btns.grid(row=r, column=0, columnspan=3, sticky="ew", pady=4)
     b_start = ttk.Button(btns, text="Start")
     b_stop = ttk.Button(btns, text="Stop", state="disabled")
-    b_report = ttk.Button(btns, text="Otwórz raport braków")
-    b_fix = ttk.Button(btns, text="Popraw nierozpoznane...", command=open_fixer)
-    b_folder = ttk.Button(btns, text="Otwórz folder wyników")
-    b_help = ttk.Button(btns, text="Pomoc", command=show_help)
+    b_report = ttk.Button(btns, text=tr("Otwórz raport braków"))
+    b_fix = ttk.Button(btns, text=tr("Popraw nierozpoznane..."), command=open_fixer)
+    b_folder = ttk.Button(btns, text=tr("Otwórz folder wyników"))
+    b_help = ttk.Button(btns, text=tr("Pomoc"), command=show_help)
     b_start.pack(side="left")
     b_stop.pack(side="left", padx=6)
     b_help.pack(side="right")
@@ -1383,7 +1435,7 @@ def run_gui() -> int:
             "folder": v_folder.get(), "auth": v_auth.get(), "out_dir": v_out.get(),
             "playlist": v_playlist.get(), "like": v_like.get(),
             "dry_run": v_dry.get(), "delay": v_delay.get(),
-            "workers": v_workers.get(),
+            "workers": v_workers.get(), "lang": LANG,
         }
         try:
             settings_file.write_text(json.dumps(data, ensure_ascii=False, indent=1),
@@ -1395,12 +1447,12 @@ def run_gui() -> int:
         try:
             delay = max(0.0, float(v_delay.get().replace(",", ".")))
         except ValueError:
-            messagebox.showerror(APP_NAME, "Opóźnienie musi być liczbą.")
+            messagebox.showerror(APP_NAME, tr("Opóźnienie musi być liczbą."))
             return
         try:
             workers = min(MAX_WORKERS, max(1, int(v_workers.get())))
         except ValueError:
-            messagebox.showerror(APP_NAME, f"Wątki: liczba od 1 do {MAX_WORKERS}.")
+            messagebox.showerror(APP_NAME, tr("Wątki: liczba od 1 do {}.").format(MAX_WORKERS))
             return
         cfg = Config(
             folder=Path(v_folder.get().strip()),
@@ -1413,14 +1465,14 @@ def run_gui() -> int:
             workers=workers,
         )
         if not v_folder.get().strip() or not cfg.folder.is_dir():
-            messagebox.showerror(APP_NAME, "Wybierz istniejący folder z muzyką.")
+            messagebox.showerror(APP_NAME, tr("Wybierz istniejący folder z muzyką."))
             return
         if not cfg.dry_run:
             if not cfg.auth.is_file():
                 messagebox.showerror(
                     APP_NAME,
-                    "Brak pliku autoryzacji.\nUżyj przycisku 'Utwórz z nagłówków...'.\n\n"
-                    "(W trybie 'Tylko test' plik nie jest potrzebny.)",
+                    tr("Brak pliku autoryzacji.\nUżyj przycisku 'Utwórz z nagłówków...'.\n\n"
+                       "(W trybie 'Tylko test' plik nie jest potrzebny.)"),
                 )
                 return
             if problem := auth_problem(cfg.auth):
@@ -1429,8 +1481,8 @@ def run_gui() -> int:
         if not cfg.dry_run and not cfg.playlist and not cfg.like:
             if not messagebox.askyesno(
                 APP_NAME,
-                "Nie podano playlisty ani polubień - zostanie wykonane tylko "
-                "wyszukiwanie. Kontynuować?",
+                tr("Nie podano playlisty ani polubień - zostanie wykonane tylko "
+                   "wyszukiwanie. Kontynuować?"),
             ):
                 return
         save_settings()
@@ -1476,13 +1528,30 @@ def run_gui() -> int:
     def stop() -> None:
         stop_event.set()
         b_stop.config(state="disabled")
-        v_status.set("Zatrzymywanie...")
+        v_status.set(tr("Zatrzymywanie..."))
 
     def open_path(p: Path) -> None:
         if p.exists():
             os.startfile(p)  # type: ignore[attr-defined]
         else:
-            messagebox.showinfo(APP_NAME, f"Nie ma jeszcze:\n{p}")
+            messagebox.showinfo(APP_NAME, tr("Nie ma jeszcze:\n{}").format(p))
+
+    def change_lang(_e: object = None) -> None:
+        """Przełącznik PL/EN: zapisz ustawienia i zbuduj okno od nowa w nowym języku."""
+        global LANG
+        new = next(k for k, v in LANGS.items() if v == v_lang.get())
+        if new == LANG:
+            return
+        if worker and worker[0].is_alive():
+            messagebox.showinfo(APP_NAME, tr("Zmień język po zakończeniu pracy (albo kliknij Stop)."))
+            v_lang.set(LANGS[LANG])
+            return
+        LANG = new
+        save_settings()
+        restart[0] = True
+        close_root()
+
+    cb_lang.bind("<<ComboboxSelected>>", change_lang)
 
     b_start.config(command=start)
     b_stop.config(command=stop)
@@ -1509,11 +1578,11 @@ def run_gui() -> int:
                     if n == 0:  # etap bez licznika - sam opis
                         v_status.set(stage)
                     else:
-                        v_status.set(f"{stage} - przetworzono {i}/{n}"
+                        v_status.set(tr("{} - przetworzono {}/{}").format(stage, i, n)
                                      + (f"  |  {extra}" if extra else ""))
                 elif kind == "renew":
                     reason, done = payload
-                    v_status.set("Sesja wygasła - wklej nowe nagłówki (praca wstrzymana)")
+                    v_status.set(tr("Sesja wygasła - wklej nowe nagłówki (praca wstrzymana)"))
                     root.deiconify()
                     root.lift()
                     root.bell()
@@ -1525,23 +1594,31 @@ def run_gui() -> int:
                     b_start.config(state="normal")
                     b_fix.config(state="normal")
                     b_stop.config(state="disabled")
-                    v_status.set({0: "Gotowe.", 130: "Przerwano."}.get(payload, "Błąd - zobacz log."))
+                    v_status.set(tr({0: "Gotowe.", 130: "Przerwano."}.get(payload, "Błąd - zobacz log.")))
         except queue.Empty:
             pass
-        root.after(100, poll)
+        poll_id[0] = root.after(100, poll)
+
+    poll_id: list[str] = [""]
+
+    def close_root() -> None:
+        """Zamknij okno, anulując odświeżanie (inaczej Tk zgłasza błąd po zamknięciu)."""
+        if poll_id[0]:
+            root.after_cancel(poll_id[0])
+        root.destroy()
 
     def on_close() -> None:
         if worker and worker[0].is_alive():
-            if not messagebox.askyesno(APP_NAME, "Praca trwa. Przerwać i zamknąć?"):
+            if not messagebox.askyesno(APP_NAME, tr("Praca trwa. Przerwać i zamknąć?")):
                 return
             stop_event.set()
         save_settings()
-        root.destroy()
+        close_root()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
-    root.after(100, poll)
+    poll_id[0] = root.after(100, poll)
     root.mainloop()
-    return 0
+    return restart[0]
 
 
 # --------------------------------------------------------------------------
@@ -1550,18 +1627,26 @@ def run_gui() -> int:
 
 
 def run_cli(argv: list[str]) -> int:
+    global LANG
     base = app_dir()
-    ap = argparse.ArgumentParser(description=(__doc__ or APP_NAME).split("\n")[0])
+    # Język ustalamy przed budową parsera, żeby też pomoc (-h) była w tym języku.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", choices=list(LANGS))
+    LANG = pre.parse_known_args(argv)[0].lang or system_lang()
+
+    ap = argparse.ArgumentParser(
+        description=tr("Przenosi lokalne FLAC/MP3 do YouTube Music (polubienia i playlisty)."))
     ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("folder", type=Path)
     ap.add_argument("--auth", type=Path, default=base / AUTH_NAME)
-    ap.add_argument("--out", type=Path, default=base, help="folder na cache i raport")
-    ap.add_argument("--playlist", default="", help="nazwa playlisty docelowej")
-    ap.add_argument("--like", action="store_true", help="polub dopasowane")
-    ap.add_argument("--dry-run", action="store_true", help="tylko skan + szukanie")
+    ap.add_argument("--out", type=Path, default=base, help=tr("folder na cache i raport"))
+    ap.add_argument("--playlist", default="", help=tr("nazwa playlisty docelowej"))
+    ap.add_argument("--like", action="store_true", help=tr("polub dopasowane"))
+    ap.add_argument("--dry-run", action="store_true", help=tr("tylko skan + szukanie"))
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY_S)
     ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
-                    help=f"równoległe wyszukiwania (1-{MAX_WORKERS})")
+                    help=tr("równoległe wyszukiwania (1-{})").format(MAX_WORKERS))
+    ap.add_argument("--lang", choices=list(LANGS), help=tr("język komunikatów"))
     args = ap.parse_args(argv)
 
     stream = sys.stderr or sys.stdout
