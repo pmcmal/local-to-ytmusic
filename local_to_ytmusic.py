@@ -43,7 +43,7 @@ from ytmusicapi import LikeStatus, YTMusic
 from ytmusicapi.auth.browser import setup_browser
 
 APP_NAME = "Local → YouTube Music"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 AUDIO_EXT: frozenset[str] = frozenset({".flac", ".mp3"})
 CACHE_NAME = "ytm_cache.json"
 REPORT_NAME = "ytm_not_found.csv"
@@ -69,6 +69,11 @@ def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def resource(name: str) -> Path:
+    """Plik dołączony do programu: rozpakowany z .exe (PyInstaller) albo obok skryptu."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)) / name
 
 
 # --------------------------------------------------------------------------
@@ -875,6 +880,10 @@ def run_gui() -> int:
     root = tk.Tk()
     root.title(f"{APP_NAME} {__version__}")
     root.minsize(820, 520)
+    try:  # ikona okna i wszystkich okien pomocniczych
+        root.iconbitmap(default=str(resource("assets/icon.ico")))
+    except tk.TclError:
+        pass
 
     v_folder = tk.StringVar(value=st.get("folder", ""))
     v_auth = tk.StringVar(value=st.get("auth", str(base / AUTH_NAME)))
